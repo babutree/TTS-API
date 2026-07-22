@@ -115,6 +115,10 @@ globalThis.document = {
 globalThis.window = globalThis;
 globalThis.window.addEventListener = () => {};
 globalThis.requestAnimationFrame = () => 1;
+// setInterval/clearInterval 打桩为 no-op：pump ticker 用真实定时器会让 Node 事件循环
+// 永不退出导致测试超时。契约测试只验证纯函数/状态机，不依赖定时器真正触发。
+globalThis.setInterval = () => 0;
+globalThis.clearInterval = () => {};
 globalThis.console = { error() {}, log() {} };
 """
 

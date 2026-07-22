@@ -693,6 +693,13 @@ function updatePlayBtn() {
 // ============================================================
 const SAMPLE_RATE = 24000;
 const LEAD_TIME = 0.15;   // 首次起播预缓冲，吸收网络抖动(秒)
+// 前瞻式调度参数：只维持约 SCHEDULE_AHEAD 秒的已排队音频，单次最多排 SCHEDULE_CHUNK 秒。
+// 关键：Edge 云端会远快于实时地猛灌整段 PCM，若"每帧把全部数据一次性排入时间轴"，同时存活的
+// AudioBufferSourceNode 会无限膨胀(长播可达上千)且 lastEnd 无限领先，最终音频线程被压垮致卡顿/静音。
+// 节流后同时存活的 source 恒定在个位数(≈AHEAD/CHUNK)，缓冲深度封顶，与播放时长解耦。
+const SCHEDULE_AHEAD = 0.8;   // 已排队未来音频的目标深度(秒)：够吸收 ticker 抖动，又不过量堆积
+const SCHEDULE_CHUNK = 0.25;  // 单次排入时间轴的最大时长(秒)
+let pumpTicker = null;        // 持续驱动 pump 的定时器(与数据到达速率解耦)
 
 let ws = null;
 let ctx = null;
@@ -766,45 +773,73 @@ function stopAllSources() {
     sources = [];
 }
 
-// 把 [scheduledPos, writePos) 之间尚未调度的样本排入时间轴
+// 前瞻式节流调度：把 [scheduledPos, writePos) 中尚未调度的样本"按需、分块"排入时间轴。
+// 每次只在"已排队未来音频不足 SCHEDULE_AHEAD 秒"时补排至多 SCHEDULE_CHUNK 秒，
+// 由 pumpTicker 持续驱动追赶 writePos。这样同时存活的 source 数封顶(≈AHEAD/CHUNK)，
+// 与数据到达速率、播放时长解耦——根治 Edge 快灌导致的 source 爆炸 + lastEnd 无限领先。
 function pump() {
-    if (!isPlaying || !ctx || scheduledPos >= writePos) return;
+    if (!isPlaying || !ctx) return;
 
     // 懒绑定起播时刻(等首块数据到达)
     if (!anchorSet) {
+        if (scheduledPos >= writePos) return;   // 还没有数据可播，等下一帧/下一 tick
         anchorCtx = ctx.currentTime + pendingLead;
         anchorHead = scheduledPos / SAMPLE_RATE;
         lastEnd = anchorCtx;       // 第一段从锚点起播
         anchorSet = true;
     }
 
-    const seg = buffer.slice(scheduledPos, writePos);
+    // 循环补排，直到"已排队未来音频"达到目标深度或数据排尽。
+    // 已排队深度 = lastEnd - now(未来还能连续播多久)。
+    let scheduledAny = false;
+    while (scheduledPos < writePos && (lastEnd - ctx.currentTime) < SCHEDULE_AHEAD) {
+        const chunkSamples = Math.round(SCHEDULE_CHUNK * SAMPLE_RATE);
+        const end = Math.min(scheduledPos + chunkSamples, writePos);
+        const seg = buffer.slice(scheduledPos, end);
 
-    const ab = ctx.createBuffer(1, seg.length, SAMPLE_RATE);
-    ab.copyToChannel(seg, 0);
-    const src = ctx.createBufferSource();
-    src.buffer = ab;
-    src.connect(masterGain);
+        const ab = ctx.createBuffer(1, seg.length, SAMPLE_RATE);
+        ab.copyToChannel(seg, 0);
+        const src = ctx.createBufferSource();
+        src.buffer = ab;
+        src.connect(masterGain);
 
-    // 紧贴上一段末尾排队：取 max(now, lastEnd) 保证既不重叠(踩踏/电音)也无负延迟
-    const when = Math.max(ctx.currentTime, lastEnd);
-    src.start(when);
-    lastEnd = when + ab.duration;
-    scheduledPos = writePos;
+        // 紧贴上一段末尾排队：取 max(now, lastEnd) 保证既不重叠(踩踏/电音)也无负延迟
+        const when = Math.max(ctx.currentTime, lastEnd);
+        src.start(when);
+        lastEnd = when + ab.duration;
+        scheduledPos = end;
+        scheduledAny = true;
 
-    sources.push(src);
-    src.onended = () => {
-        sources = sources.filter(s => s !== src);
-        maybeDone();
-    };
+        sources.push(src);
+        src.onended = () => {
+            sources = sources.filter(s => s !== src);
+            maybeDone();
+        };
+    }
 
-    setStatus("playing");
+    // 仅在本次真正排入了音频时才置"播放中"，避免 ticker 空转反复覆盖状态(尤其掩盖将到的 done)
+    if (scheduledAny) setStatus("playing");
+}
+
+// 启动/停止 pump ticker：节流调度后单次 pump 只排一小段，数据到齐后不再有 onmessage 事件驱动，
+// 故需一个持续时钟周期性调用 pump 追赶 writePos。间隔取 CHUNK 的一半，保证追赶及时又不空转过密。
+function startPumpTicker() {
+    if (pumpTicker !== null) return;
+    pumpTicker = setInterval(() => {
+        if (!isPlaying) { stopPumpTicker(); return; }
+        pump();
+    }, SCHEDULE_CHUNK * 500);   // 秒→毫秒再取半：0.25s → 125ms
+}
+
+function stopPumpTicker() {
+    if (pumpTicker !== null) { clearInterval(pumpTicker); pumpTicker = null; }
 }
 
 function maybeDone() {
     if (!streamEnded || !isPlaying) return;
     if (scheduledPos < writePos || sources.length > 0) return;
     isPlaying = false;
+    stopPumpTicker();
     pausedHead = writePos / SAMPLE_RATE;
     setStatus("done");
     updatePlayBtn();
@@ -821,6 +856,7 @@ function startPlayback(fromSec, lead) {
     scheduledPos = Math.round(fromSec * SAMPLE_RATE);
     updatePlayBtn();
     if (ctx.state === "suspended") { ctx.resume().catch(() => {}); }
+    startPumpTicker();
     pump();
 }
 
@@ -976,11 +1012,13 @@ async function start() {
     streamEnded = false;
     setStatus("connecting");
     updatePlayBtn();
+    startPumpTicker();   // 节流调度依赖 ticker 持续驱动 pump(数据到达速率与调度解耦)
     sendRequest();
 }
 
 // 停止：清空一切
 function stop() {
+    stopPumpTicker();
     stopAllSources();
     if (ws) { try { ws.close(); } catch (_) {} ws = null; }
     runQueue = [];
@@ -1005,6 +1043,7 @@ function togglePlay() {
         pausedHead = getHead();
         isPlaying = false;
         isPaused = true;
+        stopPumpTicker();
         stopAllSources();
         setStatus("paused");
         updatePlayBtn();
