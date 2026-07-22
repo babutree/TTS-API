@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title id="docTitle">TTS API Reference</title>
+    <!-- 样式抽到共享 style.css，全部作用域限定在 body.api-doc 下 -->
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" href="/favicon.ico">
+</head>
+<body class="api-doc">
+    <div class="wrap">
+        <div class="top-actions">
+            <button class="lang-btn" id="langBtn" onclick="toggleLang()" title="中文 / English"><span id="langLabel">中</span></button>
+            <a href="https://github.com/babutree/TTS-API" target="_blank" rel="noopener noreferrer" title="GitHub" class="gh-link">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true">
+                    <path d="M12 .5C5.73.5.5 5.73.5 12a11.5 11.5 0 0 0 7.86 10.92c.575.106.785-.25.785-.555 0-.274-.01-1.002-.015-1.967-3.196.695-3.87-1.54-3.87-1.54-.523-1.328-1.276-1.682-1.276-1.682-1.043-.713.08-.699.08-.699 1.153.081 1.76 1.184 1.76 1.184 1.026 1.758 2.692 1.25 3.348.956.104-.743.401-1.25.73-1.538-2.552-.29-5.236-1.276-5.236-5.68 0-1.255.448-2.28 1.183-3.084-.119-.29-.513-1.459.112-3.042 0 0 .965-.309 3.163 1.178a10.98 10.98 0 0 1 2.88-.388c.977.004 1.962.132 2.88.388 2.196-1.487 3.16-1.178 3.16-1.178.626 1.583.232 2.752.114 3.042.737.804 1.182 1.829 1.182 3.084 0 4.415-2.688 5.386-5.248 5.671.413.356.78 1.057.78 2.131 0 1.539-.014 2.779-.014 3.157 0 .308.207.667.79.554A11.5 11.5 0 0 0 23.5 12C23.5 5.73 18.27.5 12 .5z"/>
+                </svg>
+            </a>
+        </div>
+        <h1 data-i18n="pageTitle">TTS API Reference</h1>
+        <p class="sub" data-i18n="sub">Streaming text-to-speech · 24kHz mono 16-bit PCM · Kokoro on-device / Edge Microsoft cloud</p>
+
+        <div class="toc">
+            <a href="#auth" data-i18n="tocAuth">Authentication</a>
+            <a href="#health" data-i18n="tocHealth">Health check</a>
+            <a href="#auth-probe" data-i18n="tocAuthProbe">Key probe</a>
+            <a href="#logs" data-i18n="tocLogs">Logs</a>
+            <a href="#voices" data-i18n="tocVoices">Voices</a>
+            <a href="#preview" data-i18n="tocPreview">Voice preview</a>
+            <a href="#tts" data-i18n="tocTts">REST synthesis</a>
+            <a href="#ws" data-i18n="tocWs">WebSocket synthesis</a>
+            <a href="#format" data-i18n="tocFormat">Audio format</a>
+            <a href="#static" data-i18n="tocStatic">Static files</a>
+        </div>
+
+        <h2 id="auth" data-i18n="authTitle">Authentication</h2>
+        <p data-i18n-html="authIntro">The service has <strong>built-in API Key authentication</strong> so external programmatic clients (browser extensions, scripts, other backends) can call it directly. Rules:</p>
+        <ul>
+            <li data-i18n-html="authLi1"><strong>Where the key comes from</strong>: set the <code>TTS_API_KEY</code> environment variable in <code>docker-compose.yml</code>. <strong>Change it to your own strong random value.</strong></li>
+            <li data-i18n-html="authLi2"><strong>Empty (unset) = fully open</strong>: any request is allowed, keeping local direct-connect usage working.</li>
+            <li data-i18n-html="authLi3"><strong>Same-origin pages are exempt</strong>: this docs page and the main UI (<code>/index.html</code>) are <strong>same-origin</strong> with the backend and need no key in a browser.</li>
+            <li data-i18n-html="authLi4"><strong>External clients must send the key</strong>: REST uses header <code>X-API-Key: &lt;key&gt;</code> (preferred, especially behind Caddy Basic Auth) or <code>Authorization: Bearer &lt;key&gt;</code>; WebSocket cannot set custom headers in a browser, so use query parameter <code>/ws/tts?key=&lt;key&gt;</code>.</li>
+        </ul>
+        <p class="hint" data-i18n="authHint">Honest boundary: same-origin exemption relies on the Origin/Referer header, which non-browser clients can forge. For real network isolation still put a reverse proxy (Caddy) in front; the key provides controlled access for external integrations.</p>
+        <pre><code id="authCode"># CRX plugin call example (external client, key required)
+fetch("https://tts.example.com/api/tts", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-API-Key": "YOUR_SECRET_KEY"
+  },
+  body: JSON.stringify({ text: "Hello", engine: "kokoro", voice: "zf_xiaoxiao", speed: 1.0 })
+});</code></pre>
+        <div class="tester">
+            <div class="field">
+                <label for="apiKey" data-i18n="keyLabel">Test key (stored in browser localStorage, this device only)</label>
+                <div class="row-inline">
+                    <input id="apiKey" type="password" data-i18n-ph="keyPh" placeholder="Empty = no auth (direct local instance)" autocomplete="off" style="flex:1; min-width:220px;">
+                    <button class="btn btn-sm" onclick="saveKey()" data-i18n="btnSave">Save</button>
+                    <button class="btn btn-sm" onclick="clearKey()" style="background:linear-gradient(135deg,#64748b,#475569);" data-i18n="btnClear">Clear</button>
+                    <button class="btn btn-sm" onclick="toggleKey()" style="background:linear-gradient(135deg,#64748b,#475569);" data-i18n="btnShowHide">Show/Hide</button>
+                    <button class="btn btn-sm" onclick="testAuth()" data-i18n="btnVerify">Verify key</button>
+                </div>
+                <p class="hint" id="keyState"></p>
+                <div class="out" id="outAuth"></div>
+            </div>
+        </div>
+
+        <h2 id="health"><span class="method">GET</span><span class="path">/</span></h2>
+        <p data-i18n-html="healthDesc">Health check. Returns the engine and <code>ffmpeg</code> readiness status.</p>
+        <h3 data-i18n="healthResp200">Response 200 — engine ready</h3>
+        <pre><code>{ "status": "v0.1 engine running", "ready": true }</code></pre>
+        <h3 data-i18n="healthResp503">Response 503 — engine starting</h3>
+        <pre><code>{ "status": "starting", "ready": false }</code></pre>
+        <h3 data-i18n="healthRespFfmpeg">Response 503 — ffmpeg missing</h3>
+        <pre><code>{ "status": "ffmpeg missing", "ready": false }</code></pre>
+        <div class="tester">
+            <div><button class="btn" onclick="testHealth()" data-i18n="btnSend">Send request</button></div>
+            <div class="out" id="outHealth"></div>
+        </div>
+
+        <h2 id="auth-probe"><span class="method">GET</span><span class="path">/api/auth</span></h2>
+        <p data-i18n-html="probeDesc">Key-probe endpoint: verifies whether the supplied key is valid, so a client (e.g. a CRX extension) can check credentials before real calls. This endpoint <strong>does not honor same-origin exemption</strong> — even the bundled pages must send a correct key to get <code>authorized: true</code>.</p>
+        <h3 data-i18n="probeResp200">Response 200 — authorized (or auth disabled)</h3>
+        <pre><code>{ "auth": "enabled", "authorized": true }
+{ "auth": "disabled", "authorized": true }   // when TTS_API_KEY is not configured</code></pre>
+        <h3 data-i18n="probeResp401">Response 401 — key missing or wrong</h3>
+        <pre><code>{ "auth": "enabled", "authorized": false, "detail": "缺少或错误的 API Key" }</code></pre>
+        <p class="hint" data-i18n="probeHint">Use the "Verify key" button in the Authentication section above to test this endpoint.</p>
+
+        <h2 id="logs"><span class="method">GET</span><span class="path">/api/logs</span></h2>
+        <p data-i18n-html="logsDesc">Diagnostic log endpoint for the in-memory ring buffer. It is not same-origin exempt; when <code>TTS_API_KEY</code> is configured, send a valid key with <code>X-API-Key</code> or <code>Authorization: Bearer</code>.</p>
+        <pre><code>{ "limit": 100, "total_buffered": 287, "lines": ["2026-... INFO tts-api: ..."] }</code></pre>
+
+        <h2 id="voices"><span class="method">GET</span><span class="path">/api/voices</span></h2>
+        <p data-i18n="voicesDesc">List all available voices for both engines. Edge voices are fetched live from Microsoft and cached for the configured TTL.</p>
+        <pre><code>{
+  "kokoro": [
+    { "id": "zf_xiaoxiao", "name": "晓晓", "gender": "female", "language": "zh" },
+    { "id": "am_michael",  "name": "Michael", "gender": "male", "language": "en" }
+  ],
+  "edge": [
+    { "id": "zh-CN-XiaoxiaoNeural", "name": "...", "gender": "Female", "locale": "zh-CN" },
+    { "id": "en-US-AvaNeural",      "name": "...", "gender": "Female", "locale": "en-US" }
+  ]
+}</code></pre>
+        <div class="tester">
+            <div><button class="btn" onclick="testVoices()" data-i18n="btnSend">Send request</button></div>
+            <div class="out" id="outVoices"></div>
+        </div>
+
+        <h2 id="preview"><span class="method">GET</span><span class="path">/api/voices/preview</span></h2>
+        <p data-i18n-html="previewDesc">Synthesize a short built-in voice preview. Query parameters: <code>engine</code> (<code>kokoro</code> or <code>edge</code>), <code>voice</code>, and <code>speed</code> (<code>0.5</code>–<code>3.0</code>). The response is <code>audio/mpeg</code> with <code>Content-Disposition: inline</code>.</p>
+
+        <h2 id="tts"><span class="method">POST</span><span class="path">/api/tts</span></h2>
+        <p data-i18n="ttsDesc">Stream MP3 audio for the given text.</p>
+        <h3 data-i18n="ttsReqBody">Request body</h3>
+        <pre><code>{
+  "text": "你好世界",
+  "engine": "kokoro",
+  "voice": "zf_xiaoxiao",
+  "speed": 1.0,
+  "ssml": false
+}</code></pre>
+        <table>
+            <thead><tr><th data-i18n="thField">Field</th><th data-i18n="thType">Type</th><th data-i18n="thDefault">Default</th><th data-i18n="thDesc">Description</th></tr></thead>
+            <tbody>
+                <tr><td><code>text</code></td><td>string</td><td>—</td><td data-i18n-html="ttsFieldText">Input text (required, non-empty; max length from <code>MAX_TEXT_LENGTH</code>, default <code>100000</code>)</td></tr>
+                <tr><td><code>engine</code></td><td>string</td><td><code>"kokoro"</code></td><td data-i18n-html="ttsFieldEngine"><code>"kokoro"</code> (on-device) or <code>"edge"</code> (Microsoft cloud)</td></tr>
+                <tr><td><code>voice</code></td><td>string</td><td><code>"zf_xiaoxiao"</code></td><td data-i18n-html="ttsFieldVoice">Voice ID from <code>/api/voices</code></td></tr>
+                <tr><td><code>speed</code></td><td>number</td><td><code>1.0</code></td><td data-i18n-html="ttsFieldSpeed">Playback speed, range <code>0.5</code>–<code>3.0</code></td></tr>
+                <tr><td><code>ssml</code></td><td>boolean</td><td><code>false</code></td><td data-i18n-html="ttsFieldSsml">Reserved flag. Raw SSML is currently rejected with <code>422</code>.</td></tr>
+                <tr><td><code>download</code></td><td>query</td><td><code>false</code></td><td data-i18n-html="ttsFieldDownload">Set <code>?download=true</code> to return <code>Content-Disposition: attachment</code>.</td></tr>
+            </tbody>
+        </table>
+        <h3 data-i18n="ttsRespTitle">Response</h3>
+        <table>
+            <thead><tr><th data-i18n="thStatus">Status</th><th data-i18n="thDesc">Description</th></tr></thead>
+            <tbody>
+                <tr><td><code>200</code></td><td data-i18n-html="ttsResp200"><code>audio/mpeg</code> streaming response</td></tr>
+                <tr><td><code>400</code></td><td data-i18n="ttsResp400">Empty text, empty after Markdown cleaning, or no speakable content for the selected voice</td></tr>
+                <tr><td><code>401</code></td><td data-i18n="ttsResp401">Missing or wrong API key</td></tr>
+                <tr><td><code>429</code></td><td data-i18n="ttsResp429">ffmpeg process limit reached</td></tr>
+                <tr><td><code>422</code></td><td data-i18n-html="ttsResp422">Invalid field (including text over <code>MAX_TEXT_LENGTH</code>)</td></tr>
+                <tr><td><code>500</code></td><td data-i18n="ttsResp500">Kokoro/local synthesis failed before any audio was produced</td></tr>
+                <tr><td><code>502</code></td><td data-i18n="ttsResp502">Edge/upstream synthesis failed before any audio was produced</td></tr>
+                <tr><td><code>503</code></td><td data-i18n="ttsResp503">Engine not ready</td></tr>
+                <tr><td><code>504</code></td><td data-i18n="ttsResp504">Synthesis timed out before audio was ready</td></tr>
+            </tbody>
+        </table>
+        <div class="tester">
+            <div class="field">
+                <label for="ttsText">text</label>
+                <textarea id="ttsText">你好世界，这是一段测试语音。</textarea>
+            </div>
+            <div class="field-row">
+                <div class="field">
+                    <label for="ttsEngine">engine</label>
+                    <select id="ttsEngine"><option value="kokoro">kokoro</option><option value="edge">edge</option></select>
+                </div>
+                <div class="field">
+                    <label for="ttsVoice">voice</label>
+                    <input id="ttsVoice" value="zf_xiaoxiao">
+                </div>
+                <div class="field">
+                    <label for="ttsSpeed">speed</label>
+                    <input id="ttsSpeed" type="number" value="1.0" step="0.05" min="0.5" max="3.0">
+                </div>
+            </div>
+            <label class="check"><input id="ttsDownload" type="checkbox"> <span data-i18n="ttsDownloadLabel">Download as attachment</span></label>
+            <div><button class="btn" id="ttsBtn" onclick="testTts()" data-i18n="btnSendPlay">Send request and play</button></div>
+            <div class="out" id="outTts"></div>
+            <audio id="ttsAudio" controls hidden></audio>
+        </div>
+
+        <h2 id="ws"><span class="method">WS</span><span class="path">/ws/tts</span></h2>
+        <p data-i18n="wsDesc">Interactive TTS session. Send a JSON request, receive a stream of binary PCM frames interleaved with JSON control messages. The connection stays open after a request completes, so you can send the next request.</p>
+
+        <h3 data-i18n="wsC2S">Client → Server</h3>
+        <pre><code>{
+  "text": "第一句。\n第二句。",
+  "engine": "kokoro",
+  "voice": "zf_xiaoxiao",
+  "speed": 1.0
+}</code></pre>
+        <p data-i18n-html="wsC2SNote">Separate sentences with <code>\n</code> — the server uses these as synthesis units and aligns segment boundaries 1:1 for gapless streaming. <code>speed</code> is clamped server-side to <code>0.5</code>–<code>3.0</code>.</p>
+
+        <h3 data-i18n="wsS2C">Server → Client</h3>
+        <table>
+            <thead><tr><th data-i18n="thMessage">Message</th><th data-i18n="thType">Type</th><th data-i18n="thDesc">Description</th></tr></thead>
+            <tbody>
+                <tr><td><code>{"type":"start"}</code></td><td>JSON</td><td data-i18n="wsMsgStart">Begin processing a request</td></tr>
+                <tr><td><code>{"type":"seg","text":"..."}</code></td><td>JSON</td><td data-i18n="wsMsgSeg">Sentence boundary marker; marks the start of one synthesis unit in the PCM stream</td></tr>
+                <tr><td data-i18n="wsMsgBinary">Binary frame</td><td>ArrayBuffer</td><td data-i18n="wsMsgBinaryDesc">24kHz 16-bit mono PCM chunk (typically 2048 bytes)</td></tr>
+                <tr><td><code>{"type":"end"}</code></td><td>JSON</td><td data-i18n="wsMsgEnd">All audio sent; connection stays open</td></tr>
+                <tr><td><code>{"type":"error","message":"..."}</code></td><td>JSON</td><td data-i18n="wsMsgError">Request rejected or synthesis failed; connection stays open</td></tr>
+            </tbody>
+        </table>
+        <p data-i18n-html="wsErrorDesc"><code>error</code> covers: invalid JSON, missing/empty <code>text</code>, text over length, unknown <code>engine</code>, unknown Kokoro <code>voice</code>, and synthesis failure (e.g. an invalid Edge voice or engine fault). On synthesis failure the server sends <code>error</code> instead of <code>end</code>, so the client leaves the "synthesizing" state without a false success.</p>
+
+        <h3 data-i18n="wsCancelTitle">Cancel / Interrupt</h3>
+        <p data-i18n="wsCancelDesc">While the server is synthesizing, the client can send any message (or close the connection) to cancel the current request. The server immediately stops synthesis and starts listening for the next request.</p>
+
+        <h3 data-i18n="wsAutoTitle">Auto engine</h3>
+        <p data-i18n-html="wsAutoDesc"><code>"engine":"auto"</code> is a <strong>client-side UI option only</strong> — it is never sent to the server. When Auto is selected, the browser splits by sentence and language boundary: Chinese (including Chinese punctuation) routes to the Chinese voice, and English (including single terms/all-caps abbreviations like <code>DNS</code>, <code>OpenWrt</code>) always routes to the English voice. Each Kokoro pipeline is monolingual — the Chinese pipeline cannot even pronounce isolated English abbreviations (official issues #95/#238), so English is never merged into a Chinese segment.</p>
+
+        <h3 data-i18n="wsPrepTitle">Text preprocessing</h3>
+        <p data-i18n="wsPrepDesc1">Before synthesis the server strips Markdown formatting (code blocks, inline code, images, links, headings, blockquotes, lists, bold/italic/strikethrough, horizontal rules) and removes quotation marks (straight/curly double quotes, CJK corner brackets, guillemets), preventing markup from being read aloud or quotes producing phoneme artifacts in Kokoro.</p>
+        <p data-i18n-html="wsPrepDesc2">Additionally Kokoro applies per-voice language filtering (a fallback safeguard): Chinese voices (<code>zf_*</code>/<code>zm_*</code>) strip all English letters before synthesis, English voices (<code>af_*</code>/<code>am_*</code>) strip all CJK characters. Each Kokoro pipeline is monolingual and mispronounces cross-language text, so stripping the other language is preferable to reading garbage. For mixed Chinese/English text, use Auto mode in the UI to route per sentence.</p>
+
+        <h3 data-i18n="wsTestTitle">Online test</h3>
+        <div class="tester">
+            <div class="field">
+                <label for="wsText" data-i18n="wsTextLabel">text (use line breaks to split sentences)</label>
+                <textarea id="wsText">第一句测试。
+第二句测试。</textarea>
+            </div>
+            <div class="field-row">
+                <div class="field">
+                    <label for="wsEngine">engine</label>
+                    <select id="wsEngine"><option value="kokoro">kokoro</option><option value="edge">edge</option></select>
+                </div>
+                <div class="field">
+                    <label for="wsVoice">voice</label>
+                    <input id="wsVoice" value="zf_xiaoxiao">
+                </div>
+                <div class="field">
+                    <label for="wsSpeed">speed</label>
+                    <input id="wsSpeed" type="number" value="1.0" step="0.05" min="0.5" max="3.0">
+                </div>
+            </div>
+            <div><button class="btn" id="wsBtn" onclick="testWs()" data-i18n="btnWsConnect">Connect, synthesize and play</button></div>
+            <div class="out" id="outWs"></div>
+        </div>
+
+        <h2 id="format" data-i18n="formatTitle">Audio format</h2>
+        <table>
+            <thead><tr><th data-i18n="thParam">Parameter</th><th data-i18n="thValue">Value</th></tr></thead>
+            <tbody>
+                <tr><td data-i18n="fmtSampleRate">Sample rate</td><td><strong>24000 Hz</strong></td></tr>
+                <tr><td data-i18n="fmtChannels">Channels</td><td><strong data-i18n="fmtMono">mono (1)</strong></td></tr>
+                <tr><td data-i18n="fmtBitDepth">Bit depth</td><td data-i18n-html="fmtBitDepthVal"><strong>16-bit signed little-endian PCM</strong> (WebSocket) / <strong>MP3</strong> (REST)</td></tr>
+            </tbody>
+        </table>
+
+        <h2 id="static" data-i18n="staticTitle">Static files</h2>
+        <table>
+            <thead><tr><th data-i18n="thPath">Path</th><th data-i18n="thContent">Content</th></tr></thead>
+            <tbody>
+                <tr><td><a href="/index.html">/index.html</a></td><td data-i18n="staticUi">Single-page browser UI</td></tr>
+                <tr><td><code>/static/style.css</code></td><td data-i18n="staticCss">Stylesheet</td></tr>
+                <tr><td><a href="/api">/api</a></td><td data-i18n="staticDoc">This docs page</td></tr>
+                <tr><td><code>/favicon.ico</code></td><td data-i18n="staticFavicon">Site favicon (200)</td></tr>
+            </tbody>
+        </table>
+
+        <footer data-i18n-html="footer">
+            Built-in API Key authentication (<code>TTS_API_KEY</code>, see Authentication above); for real network isolation still deploy behind a reverse proxy such as Caddy. Full reference in the repo <code>API.md</code>.
+        </footer>
+    </div>
+
+<script>
+// ============================================================
+// 界面语言 —— 中/英切换，默认英文，记忆到 localStorage
+// ============================================================
+const I18N = {
+    en: {
+        docTitle: "TTS API Reference",
+        pageTitle: "TTS API Reference",
+        sub: "Streaming text-to-speech · 24kHz mono 16-bit PCM · Kokoro on-device / Edge Microsoft cloud",
+        tocAuth: "Authentication", tocHealth: "Health check", tocAuthProbe: "Key probe",
+        tocLogs: "Logs", tocVoices: "Voices", tocPreview: "Voice preview",
+        tocTts: "REST synthesis", tocWs: "WebSocket synthesis",
+        tocFormat: "Audio format", tocStatic: "Static files",
+        authTitle: "Authentication",
+        authIntro: "The service has <strong>built-in API Key authentication</strong> so external programmatic clients (browser extensions, scripts, other backends) can call it directly. Rules:",
+        authLi1: "<strong>Where the key comes from</strong>: set the <code>TTS_API_KEY</code> environment variable in <code>docker-compose.yml</code>. <strong>Change it to your own strong random value.</strong>",
+        authLi2: "<strong>Empty (unset) = fully open</strong>: any request is allowed, keeping local direct-connect usage working.",
+        authLi3: "<strong>Same-origin pages are exempt</strong>: this docs page and the main UI (<code>/index.html</code>) are <strong>same-origin</strong> with the backend and need no key in a browser.",
+        authLi4: "<strong>External clients must send the key</strong>: REST uses header <code>X-API-Key: &lt;key&gt;</code> (preferred, especially behind Caddy Basic Auth) or <code>Authorization: Bearer &lt;key&gt;</code>; WebSocket cannot set custom headers in a browser, so use query parameter <code>/ws/tts?key=&lt;key&gt;</code>.",
+        authHint: "Honest boundary: same-origin exemption relies on the Origin/Referer header, which non-browser clients can forge. For real network isolation still put a reverse proxy (Caddy) in front; the key provides controlled access for external integrations.",
+        authCode: "# CRX plugin call example (external client, key required)\nfetch(\"https://tts.example.com/api/tts\", {\n  method: \"POST\",\n  headers: {\n    \"Content-Type\": \"application/json\",\n    \"X-API-Key\": \"YOUR_SECRET_KEY\"\n  },\n  body: JSON.stringify({ text: \"Hello\", engine: \"kokoro\", voice: \"zf_xiaoxiao\", speed: 1.0 })\n});",
+        keyLabel: "Test key (stored in browser localStorage, this device only)",
+        keyPh: "Empty = no auth (direct local instance)",
+        btnSave: "Save", btnClear: "Clear", btnShowHide: "Show/Hide", btnVerify: "Verify key",
+        btnSend: "Send request", btnSendPlay: "Send request and play", btnWsConnect: "Connect, synthesize and play",
+        healthDesc: "Health check. Returns the engine and <code>ffmpeg</code> readiness status.",
+        healthResp200: "Response 200 — engine ready",
+        healthResp503: "Response 503 — engine starting",
+        healthRespFfmpeg: "Response 503 — ffmpeg missing",
+        probeDesc: "Key-probe endpoint: verifies whether the supplied key is valid, so a client (e.g. a CRX extension) can check credentials before real calls. This endpoint <strong>does not honor same-origin exemption</strong> — even the bundled pages must send a correct key to get <code>authorized: true</code>.",
+        probeResp200: "Response 200 — authorized (or auth disabled)",
+        probeResp401: "Response 401 — key missing or wrong",
+        probeHint: "Use the \"Verify key\" button in the Authentication section above to test this endpoint.",
+        logsDesc: "Diagnostic log endpoint for the in-memory ring buffer. It is not same-origin exempt; when <code>TTS_API_KEY</code> is configured, send a valid key with <code>X-API-Key</code> or <code>Authorization: Bearer</code>.",
+        voicesDesc: "List all available voices for both engines. Edge voices are fetched live from Microsoft and cached for the configured TTL.",
+        previewDesc: "Synthesize a short built-in voice preview. Query parameters: <code>engine</code> (<code>kokoro</code> or <code>edge</code>), <code>voice</code>, and <code>speed</code> (<code>0.5</code>–<code>3.0</code>). The response is <code>audio/mpeg</code> with <code>Content-Disposition: inline</code>.",
+        ttsDesc: "Stream MP3 audio for the given text.",
+        ttsReqBody: "Request body",
+        thField: "Field", thType: "Type", thDefault: "Default", thDesc: "Description",
+        thStatus: "Status", thMessage: "Message", thParam: "Parameter", thValue: "Value",
+        thPath: "Path", thContent: "Content",
+        ttsFieldText: "Input text (required, non-empty; max length from <code>MAX_TEXT_LENGTH</code>, default <code>100000</code>)",
+        ttsFieldEngine: "<code>\"kokoro\"</code> (on-device) or <code>\"edge\"</code> (Microsoft cloud)",
+        ttsFieldVoice: "Voice ID from <code>/api/voices</code>",
+        ttsFieldSpeed: "Playback speed, range <code>0.5</code>–<code>3.0</code>",
+        ttsFieldSsml: "Reserved flag. Raw SSML is currently rejected with <code>422</code> because edge-tts escapes input text before building its own SSML request.",
+        ttsFieldDownload: "Set <code>?download=true</code> to return <code>Content-Disposition: attachment</code>.",
+        ttsRespTitle: "Response",
+        ttsResp200: "<code>audio/mpeg</code> streaming response",
+        ttsResp400: "Empty text, empty after Markdown cleaning, or no speakable content for the selected voice",
+        ttsResp401: "Missing or wrong API key",
+        ttsResp429: "ffmpeg process limit reached",
+        ttsResp422: "Invalid field (including text over <code>MAX_TEXT_LENGTH</code>)",
+        ttsResp500: "Kokoro/local synthesis failed before any audio was produced",
+        ttsResp502: "Edge/upstream synthesis failed before any audio was produced",
+        ttsResp503: "Engine not ready",
+        ttsResp504: "Synthesis timed out before audio was ready",
+        ttsDownloadLabel: "Download as attachment",
+        wsDesc: "Interactive TTS session. Send a JSON request, receive a stream of binary PCM frames interleaved with JSON control messages. The connection stays open after a request completes, so you can send the next request.",
+        wsC2S: "Client → Server",
+        wsC2SNote: "Separate sentences with <code>\\n</code> — the server uses these as synthesis units and aligns segment boundaries 1:1 for gapless streaming. <code>speed</code> is clamped server-side to <code>0.5</code>–<code>3.0</code>.",
+        wsS2C: "Server → Client",
+        wsMsgStart: "Begin processing a request",
+        wsMsgSeg: "Sentence boundary marker; marks the start of one synthesis unit in the PCM stream",
+        wsMsgBinary: "Binary frame",
+        wsMsgBinaryDesc: "24kHz 16-bit mono PCM chunk (typically 2048 bytes)",
+        wsMsgEnd: "All audio sent; connection stays open",
+        wsMsgError: "Request rejected or synthesis failed; connection stays open",
+        wsErrorDesc: "<code>error</code> covers: invalid JSON, missing/empty <code>text</code>, text over length, unknown <code>engine</code>, unknown Kokoro <code>voice</code>, and synthesis failure (e.g. an invalid Edge voice or engine fault). On synthesis failure the server sends <code>error</code> instead of <code>end</code>, so the client leaves the \"synthesizing\" state without a false success.",
+        wsCancelTitle: "Cancel / Interrupt",
+        wsCancelDesc: "While the server is synthesizing, the client can send any message (or close the connection) to cancel the current request. The server immediately stops synthesis and starts listening for the next request.",
+        wsAutoTitle: "Auto engine",
+        wsAutoDesc: "<code>\"engine\":\"auto\"</code> is a <strong>client-side UI option only</strong> — it is never sent to the server. When Auto is selected, the browser splits by sentence and language boundary: Chinese (including Chinese punctuation) routes to the Chinese voice, and English (including single terms/all-caps abbreviations like <code>DNS</code>, <code>OpenWrt</code>) always routes to the English voice. Each Kokoro pipeline is monolingual — the Chinese pipeline cannot even pronounce isolated English abbreviations (official issues #95/#238), so English is never merged into a Chinese segment.",
+        wsPrepTitle: "Text preprocessing",
+        wsPrepDesc1: "Before synthesis the server strips Markdown formatting (code blocks, inline code, images, links, headings, blockquotes, lists, bold/italic/strikethrough, horizontal rules) and removes quotation marks (straight/curly double quotes, CJK corner brackets, guillemets), preventing markup from being read aloud or quotes producing phoneme artifacts in Kokoro.",
+        wsPrepDesc2: "Additionally Kokoro applies per-voice language filtering (a fallback safeguard): Chinese voices (<code>zf_*</code>/<code>zm_*</code>) strip all English letters before synthesis, English voices (<code>af_*</code>/<code>am_*</code>) strip all CJK characters. Each Kokoro pipeline is monolingual and mispronounces cross-language text, so stripping the other language is preferable to reading garbage. For mixed Chinese/English text, use Auto mode in the UI to route per sentence.",
+        wsTestTitle: "Online test",
+        wsTextLabel: "text (use line breaks to split sentences)",
+        formatTitle: "Audio format",
+        fmtSampleRate: "Sample rate", fmtChannels: "Channels", fmtMono: "mono (1)",
+        fmtBitDepth: "Bit depth",
+        fmtBitDepthVal: "<strong>16-bit signed little-endian PCM</strong> (WebSocket) / <strong>MP3</strong> (REST)",
+        staticTitle: "Static files",
+        staticUi: "Single-page browser UI", staticCss: "Stylesheet",
+        staticDoc: "This docs page", staticFavicon: "Site favicon (200)",
+        footer: "Built-in API Key authentication (<code>TTS_API_KEY</code>, see Authentication above); for real network isolation still deploy behind a reverse proxy such as Caddy. Full reference in the repo <code>API.md</code>.",
+        // 动态字符串
+        dynVerifying: "Verifying…", dynRequesting: "Requesting…",
+        dyn401Proxy: "(Reverse proxy returned 401: Caddy login auth may have failed, not a backend key error)",
+        dynEmptyResp: "(empty response)",
+        dynReqFail: "Request failed: ",
+        dynKeySaved: (n) => `Key saved (length ${n}); REST requests send X-API-Key, WS sends ?key=`,
+        dynKeyNone: "No key set: requests without auth (for direct local instance)",
+        dynVoicesHead: (kc, ec, status) => `HTTP ${status} · kokoro ${kc} · edge ${ec}\n\n`,
+        dynTruncated: "\n… (truncated)",
+        dynWsConnect: (u) => `Connecting ${u}`,
+        dynWsCreateFail: "Failed to create WebSocket: ",
+        dynWsConnected: "Connected, sending request…",
+        dynWsEnd: (b, s) => `← end · received ${b} bytes PCM (${s}s)`,
+        dynWsError: "WebSocket error",
+        dynWsClosed: "Connection closed",
+        dynTtsGot: (kb, type) => `HTTP 200 · received ${kb} KB (${type}), playing`,
+        dynNoAudio: "No audio data, skipping playback",
+        dynPlaying: "Playing synthesized audio…",
+        dynPlayFail: "Playback failed: ",
+        outPlaceholder: "Response will appear here…",
+    },
+    zh: {
+        docTitle: "TTS API 文档",
+        pageTitle: "TTS API 文档",
+        sub: "流式文本转语音服务 · 24kHz 单声道 16-bit PCM · Kokoro 本机合成 / Edge 微软在线",
+        tocAuth: "鉴权密钥", tocHealth: "健康检查", tocAuthProbe: "密钥探测",
+        tocLogs: "日志", tocVoices: "音色列表", tocPreview: "音色试听",
+        tocTts: "REST 合成", tocWs: "WebSocket 合成",
+        tocFormat: "音频格式", tocStatic: "静态资源",
+        authTitle: "鉴权密钥",
+        authIntro: "本服务<strong>内置 API Key 鉴权</strong>，用于让外部程序化客户端（如浏览器扩展 CRX、脚本、其他后端）合法接入。规则：",
+        authLi1: "<strong>密钥从哪来</strong>：在 <code>docker-compose.yml</code> 的 <code>TTS_API_KEY</code> 环境变量中配置，<strong>请自行改成你自己的强随机值</strong>。",
+        authLi2: "<strong>未配置（留空）= 完全开放</strong>：兼容本地直连，任意请求放行。",
+        authLi3: "<strong>自有页面免密</strong>：本文档页与主 UI（<code>/index.html</code>）与后端<strong>同源</strong>，浏览器直接使用时无需密钥。",
+        authLi4: "<strong>外部客户端需带密钥</strong>：REST 优先用请求头 <code>X-API-Key: &lt;密钥&gt;</code>（尤其适合 Caddy Basic Auth 前置场景），也支持 <code>Authorization: Bearer &lt;密钥&gt;</code>；WebSocket 浏览器无法设自定义头，用查询参数 <code>/ws/tts?key=&lt;密钥&gt;</code>。",
+        authHint: "诚实边界：同源免密基于 Origin/Referer 头，非浏览器客户端可伪造。真正的网络隔离仍建议由反向代理（Caddy）兜底；此处密钥用于为外部集成提供受控接入能力。",
+        authCode: "# CRX 插件调用示例（外部客户端，需带密钥）\nfetch(\"https://tts.example.com/api/tts\", {\n  method: \"POST\",\n  headers: {\n    \"Content-Type\": \"application/json\",\n    \"X-API-Key\": \"YOUR_SECRET_KEY\"\n  },\n  body: JSON.stringify({ text: \"你好\", engine: \"kokoro\", voice: \"zf_xiaoxiao\", speed: 1.0 })\n});",
+        keyLabel: "测试用密钥（保存在浏览器 localStorage，仅本机）",
+        keyPh: "留空 = 不带鉴权（直连本地实例）",
+        btnSave: "保存", btnClear: "清除", btnShowHide: "显示/隐藏", btnVerify: "校验密钥",
+        btnSend: "发送请求", btnSendPlay: "发送请求并播放", btnWsConnect: "连接并合成播放",
+        healthDesc: "健康检查，返回引擎与 <code>ffmpeg</code> 就绪状态。",
+        healthResp200: "响应 200 — 引擎就绪",
+        healthResp503: "响应 503 — 引擎启动中",
+        healthRespFfmpeg: "响应 503 — ffmpeg 缺失",
+        probeDesc: "密钥探测端点：校验携带的密钥是否有效，供客户端（如 CRX）在正式调用前验证密钥。此端点<strong>不走同源免密</strong>，即便自有页面也需带正确密钥才返回 <code>authorized: true</code>。",
+        probeResp200: "响应 200 — 已授权（或服务未启用鉴权）",
+        probeResp401: "响应 401 — 密钥缺失或错误",
+        probeHint: "用上方「鉴权密钥」区的「校验密钥」按钮即可测试此端点。",
+        logsDesc: "内存环形缓冲区的诊断日志端点。此端点不走同源免密；配置 <code>TTS_API_KEY</code> 后，必须用 <code>X-API-Key</code> 或 <code>Authorization: Bearer</code> 携带有效密钥。",
+        voicesDesc: "列出两种引擎的全部可用音色。Edge 音色实时从微软拉取，并按配置的 TTL 缓存。",
+        previewDesc: "合成一段内置短音色试听。查询参数：<code>engine</code>（<code>kokoro</code> 或 <code>edge</code>）、<code>voice</code>、<code>speed</code>（<code>0.5</code>–<code>3.0</code>）。响应为 <code>audio/mpeg</code>，并使用 <code>Content-Disposition: inline</code>。",
+        ttsDesc: "为给定文本流式返回 MP3 音频。",
+        ttsReqBody: "请求体",
+        thField: "字段", thType: "类型", thDefault: "默认", thDesc: "说明",
+        thStatus: "状态码", thMessage: "消息", thParam: "参数", thValue: "值",
+        thPath: "路径", thContent: "内容",
+        ttsFieldText: "输入文本（必填、非空，最大长度由 <code>MAX_TEXT_LENGTH</code> 控制，默认 <code>100000</code>）",
+        ttsFieldEngine: "<code>\"kokoro\"</code>（本机）或 <code>\"edge\"</code>（微软云端）",
+        ttsFieldVoice: "取自 <code>/api/voices</code> 的音色 ID",
+        ttsFieldSpeed: "语速，范围 <code>0.5</code>–<code>3.0</code>",
+        ttsFieldSsml: "预留字段。当前会显式拒绝原始 SSML 并返回 <code>422</code>，因为 edge-tts 会先转义输入文本再生成自己的 SSML 请求。",
+        ttsFieldDownload: "设置 <code>?download=true</code> 返回 <code>Content-Disposition: attachment</code>。",
+        ttsRespTitle: "响应",
+        ttsResp200: "<code>audio/mpeg</code> 流式响应",
+        ttsResp400: "文本为空、经 Markdown 清洗后为空，或所选音色无可发音内容",
+        ttsResp401: "密钥缺失或错误",
+        ttsResp429: "ffmpeg 子进程并发达到上限",
+        ttsResp422: "字段非法（含文本超过 <code>MAX_TEXT_LENGTH</code>）",
+        ttsResp500: "Kokoro / 本机合成在产出音频前失败",
+        ttsResp502: "Edge / 上游合成在产出音频前失败",
+        ttsResp503: "引擎未就绪",
+        ttsResp504: "首段音频就绪前合成超时",
+        ttsDownloadLabel: "作为附件下载",
+        wsDesc: "交互式 TTS 会话。发送 JSON 请求，接收二进制 PCM 帧与 JSON 控制消息交错的流。连接在一次请求完成后保持打开，可继续发下一个请求。",
+        wsC2S: "客户端 → 服务端",
+        wsC2SNote: "用 <code>\\n</code> 分隔句子——服务端以此为合成单元，段边界 1:1 对齐，实现无缝流式播放。<code>speed</code> 服务端会钳制到 <code>0.5</code>–<code>3.0</code>。",
+        wsS2C: "服务端 → 客户端",
+        wsMsgStart: "开始处理请求",
+        wsMsgSeg: "句边界标记，标识 PCM 流中一个合成单元的起点",
+        wsMsgBinary: "二进制帧",
+        wsMsgBinaryDesc: "24kHz 16-bit 单声道 PCM 块（通常 2048 字节）",
+        wsMsgEnd: "音频发送完毕，连接保持打开",
+        wsMsgError: "请求被拒或合成失败，连接保持打开",
+        wsErrorDesc: "<code>error</code> 覆盖：非法 JSON、缺失/空 <code>text</code>、文本超长、未知 <code>engine</code>、未知 Kokoro <code>voice</code>、合成失败（如非法 Edge 音色或引擎故障）。合成失败时服务端发 <code>error</code> 而非 <code>end</code>，客户端据此脱离「合成中」状态，不伪装成功。",
+        wsCancelTitle: "取消 / 打断",
+        wsCancelDesc: "合成期间，客户端发送任意消息（或关闭连接）即可取消当前请求。服务端立即停止合成并开始监听下一个请求。",
+        wsAutoTitle: "Auto 引擎",
+        wsAutoDesc: "<code>\"engine\":\"auto\"</code> 是<strong>纯前端 UI 选项</strong>，从不发往服务端。选中 Auto 时，浏览器按句与语言边界切分：中文（含中文标点）路由到中文音色，英文（含单个术语/全大写缩写如 <code>DNS</code>、<code>OpenWrt</code>）一律路由到英文音色。Kokoro 每个 pipeline 单语言，中文 pipeline 连孤立英文缩写都读不出（官方 issue #95/#238），故绝不把英文合并进中文段。",
+        wsPrepTitle: "文本预处理",
+        wsPrepDesc1: "服务端合成前自动剥离 Markdown 标记（代码块、行内代码、图片、链接、标题、引用、列表、粗体/斜体/删除线、分隔线）并移除引号（直/弯双引号、中文方括号引号、书名号），避免标记被读出或引号在 Kokoro 中产生音素杂音。",
+        wsPrepDesc2: "此外 Kokoro 按音色做语言过滤（兜底防线）：中文音色（<code>zf_*</code>/<code>zm_*</code>）合成前剥离全部英文字母，英文音色（<code>af_*</code>/<code>am_*</code>）剥离全部 CJK 字符。Kokoro 每个 pipeline 单语言、跨语言必读错，故剥离另一语言比硬读乱码更可接受。混合中英文本请在 UI 使用 Auto 模式按句路由到对应音色。",
+        wsTestTitle: "在线测试",
+        wsTextLabel: "text（可用换行分句）",
+        formatTitle: "音频格式",
+        fmtSampleRate: "采样率", fmtChannels: "声道", fmtMono: "单声道 (mono)",
+        fmtBitDepth: "位深",
+        fmtBitDepthVal: "<strong>16-bit 有符号小端 PCM</strong>（WebSocket）/ <strong>MP3</strong>（REST）",
+        staticTitle: "静态资源",
+        staticUi: "单页浏览器 UI", staticCss: "样式表",
+        staticDoc: "本文档页", staticFavicon: "站点 favicon (200)",
+        footer: "内置 API Key 鉴权（<code>TTS_API_KEY</code>，见上方「鉴权密钥」）；真正的网络隔离仍建议部署在 Caddy 等反向代理之后。完整参考见仓库 <code>API.md</code>。",
+        // 动态字符串
+        dynVerifying: "校验中…", dynRequesting: "请求中…",
+        dyn401Proxy: "(反向代理返回 401：可能是 Caddy 登录认证未通过，而非后端密钥错误)",
+        dynEmptyResp: "(空响应)",
+        dynReqFail: "请求失败：",
+        dynKeySaved: (n) => `已保存密钥（长度 ${n}），REST 请求将带 X-API-Key 头，WS 将带 ?key=`,
+        dynKeyNone: "未设置密钥：请求不带鉴权（适用于直连本地实例）",
+        dynVoicesHead: (kc, ec, status) => `HTTP ${status} · kokoro ${kc} 个 · edge ${ec} 个\n\n`,
+        dynTruncated: "\n… (已截断)",
+        dynWsConnect: (u) => `连接 ${u}`,
+        dynWsCreateFail: "创建 WebSocket 失败：",
+        dynWsConnected: "已连接，发送请求…",
+        dynWsEnd: (b, s) => `← end · 共收到 ${b} 字节 PCM（${s} 秒）`,
+        dynWsError: "WebSocket 错误",
+        dynWsClosed: "连接已关闭",
+        dynTtsGot: (kb, type) => `HTTP 200 · 收到 ${kb} KB (${type})，已开始播放`,
+        dynNoAudio: "无音频数据，跳过播放",
+        dynPlaying: "正在播放合成音频…",
+        dynPlayFail: "播放失败：",
+        outPlaceholder: "响应将显示在这里…",
+    },
+};
+let currentLang = localStorage.getItem("apiLang") === "zh" ? "zh" : "en";
+function t(key) { return (I18N[currentLang] && I18N[currentLang][key]) || key; }
+
+function applyLang() {
+    const dict = I18N[currentLang];
+    document.querySelectorAll("[data-i18n]").forEach(el => {
+        const k = el.getAttribute("data-i18n");
+        if (dict[k] !== undefined) el.textContent = dict[k];
+    });
+    document.querySelectorAll("[data-i18n-html]").forEach(el => {
+        const k = el.getAttribute("data-i18n-html");
+        if (dict[k] !== undefined) el.innerHTML = dict[k];
+    });
+    document.querySelectorAll("[data-i18n-ph]").forEach(el => {
+        const k = el.getAttribute("data-i18n-ph");
+        if (dict[k] !== undefined) el.setAttribute("placeholder", dict[k]);
+    });
+    const authCode = document.getElementById("authCode");
+    if (authCode) authCode.textContent = dict.authCode;
+    document.querySelectorAll(".out").forEach(el => {
+        el.dataset.placeholder = t("outPlaceholder");
+    });
+    document.documentElement.lang = currentLang === "zh" ? "zh-CN" : "en";
+    document.title = t("docTitle");
+    document.getElementById("langLabel").textContent = currentLang === "zh" ? "EN" : "中";
+    refreshKeyState();
+}
+function toggleLang() {
+    currentLang = currentLang === "zh" ? "en" : "zh";
+    localStorage.setItem("apiLang", currentLang);
+    applyLang();
+}
+
+// ============================================================
+// 鉴权密钥：存 localStorage，仅本机。REST 走 X-API-Key，WS 走 ?key= 查询参数。
+// ============================================================
+const KEY_STORE = "tts_api_key";
+const keyInput = document.getElementById("apiKey");
+const keyState = document.getElementById("keyState");
+
+function loadKey() {
+    keyInput.value = localStorage.getItem(KEY_STORE) || "";
+    refreshKeyState();
+}
+function saveKey() {
+    localStorage.setItem(KEY_STORE, keyInput.value);
+    refreshKeyState();
+}
+function clearKey() {
+    localStorage.removeItem(KEY_STORE);
+    keyInput.value = "";
+    refreshKeyState();
+}
+function toggleKey() {
+    keyInput.type = keyInput.type === "password" ? "text" : "password";
+}
+function currentKey() { return (localStorage.getItem(KEY_STORE) || "").trim(); }
+function refreshKeyState() {
+    const k = currentKey();
+    keyState.textContent = k ? t("dynKeySaved")(k.length) : t("dynKeyNone");
+}
+// REST 请求头：有密钥则附加 X-API-Key。
+// 刻意不用 Authorization: Bearer——反向代理(Caddy)的登录认证走 Authorization: Basic，
+// 若此处用 Authorization 头会覆盖浏览器缓存的 Basic 凭证，导致 Caddy 反复弹原生登录框。
+// 后端同时支持 X-API-Key(见 app.py _extract_rest_key)，用它可与 Basic Auth 共存。
+function authHeaders(extra) {
+    const h = extra ? { ...extra } : {};
+    const k = currentKey();
+    if (k) h["X-API-Key"] = k;
+    return h;
+}
+
+// ---- 输出辅助 ----
+function setOut(id, text, cls) {
+    const el = document.getElementById(id);
+    el.textContent = text;
+    el.className = "out" + (cls ? " " + cls : "");
+}
+
+// ---- GET /api/auth：校验当前密钥 ----
+async function testAuth() {
+    setOut("outAuth", t("dynVerifying"));
+    try {
+        const r = await fetch("/api/auth", { headers: authHeaders() });
+        // 先读文本再尝试解析：反代(Caddy)的 401 挑战常返回空 body 或 HTML，
+        // 直接 r.json() 会抛 "Unexpected end of JSON input"，掩盖真实的 401 状态。
+        const body = await r.text();
+        let shown = body;
+        try { shown = JSON.stringify(JSON.parse(body), null, 2); } catch (_) {}
+        if (r.status === 401 && !body.trim().startsWith("{")) {
+            shown = t("dyn401Proxy");
+        }
+        setOut("outAuth", `HTTP ${r.status}\n\n${shown || t("dynEmptyResp")}`, r.ok ? "ok" : "err");
+    } catch (e) {
+        setOut("outAuth", t("dynReqFail") + e.message, "err");
+    }
+}
+
+// ---- GET / ----
+async function testHealth() {
+    setOut("outHealth", t("dynRequesting"));
+    try {
+        const r = await fetch("/", { headers: authHeaders() });
+        const body = await r.text();
+        setOut("outHealth", `HTTP ${r.status}\n\n${body}`, r.ok ? "ok" : "err");
+    } catch (e) {
+        setOut("outHealth", t("dynReqFail") + e.message, "err");
+    }
+}
+
+// ---- GET /api/voices ----
+async function testVoices() {
+    setOut("outVoices", t("dynRequesting"));
+    try {
+        const r = await fetch("/api/voices", { headers: authHeaders() });
+        // 先读文本再解析：反代(Caddy)的 401 挑战常返回空 body 或 HTML，
+        // 直接 r.json() 会抛 "Unexpected end of JSON input"，掩盖真实的 401 状态。
+        const body = await r.text();
+        let data = null;
+        try { data = JSON.parse(body); } catch (_) {}
+        if (!data) {
+            const hint = r.status === 401 ? t("dyn401Proxy") : (body || t("dynEmptyResp"));
+            setOut("outVoices", `HTTP ${r.status}\n\n${hint}`, "err");
+            return;
+        }
+        const kc = (data.kokoro || []).length, ec = (data.edge || []).length;
+        const preview = JSON.stringify(data, null, 2);
+        const head = t("dynVoicesHead")(kc, ec, r.status);
+        setOut("outVoices", head + (preview.length > 4000 ? preview.slice(0, 4000) + t("dynTruncated") : preview), r.ok ? "ok" : "err");
+    } catch (e) {
+        setOut("outVoices", t("dynReqFail") + e.message, "err");
+    }
+}
+
+// ---- POST /api/tts ----
+async function testTts() {
+    const btn = document.getElementById("ttsBtn");
+    const audio = document.getElementById("ttsAudio");
+    btn.disabled = true;
+    setOut("outTts", t("dynRequesting"));
+    audio.hidden = true;
+    try {
+        const payload = {
+            text: document.getElementById("ttsText").value,
+            engine: document.getElementById("ttsEngine").value,
+            voice: document.getElementById("ttsVoice").value.trim(),
+            speed: parseFloat(document.getElementById("ttsSpeed").value) || 1.0,
+            ssml: false,
+        };
+        const endpoint = "/api/tts" + (document.getElementById("ttsDownload").checked ? "?download=true" : "");
+        const r = await fetch(endpoint, {
+            method: "POST",
+            headers: authHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify(payload),
+        });
+        if (!r.ok) {
+            const err = await r.text();
+            setOut("outTts", `HTTP ${r.status}\n\n${err}`, "err");
+            return;
+        }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        if (audio.dataset.url) URL.revokeObjectURL(audio.dataset.url);
+        audio.src = url;
+        audio.dataset.url = url;
+        audio.hidden = false;
+        audio.play().catch(() => {});
+        setOut("outTts", t("dynTtsGot")((blob.size / 1024).toFixed(1), blob.type), "ok");
+    } catch (e) {
+        setOut("outTts", t("dynReqFail") + e.message, "err");
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+// ---- WS /ws/tts ----
+// 累积全部 PCM，收到 end 后合成一个 AudioBuffer 播放(测试工具简化版,不做无缝流式)
+const WS_SAMPLE_RATE = 24000;
+async function testWs() {
+    const btn = document.getElementById("wsBtn");
+    btn.disabled = true;
+    const log = [];
+    const chunks = [];
+    let bytes = 0;
+    const push = (line) => { log.push(line); setOut("outWs", log.join("\n")); };
+
+    const key = currentKey();
+    const proto = location.protocol === "https:" ? "wss://" : "ws://";
+    const url = `${proto}${location.host}/ws/tts` + (key ? `?key=${encodeURIComponent(key)}` : "");
+    push(t("dynWsConnect")(url.replace(/key=[^&]+/, "key=***")));
+
+    let ws;
+    try {
+        ws = new WebSocket(url);
+    } catch (e) {
+        push(t("dynWsCreateFail") + e.message);
+        setOut("outWs", log.join("\n"), "err");
+        btn.disabled = false;
+        return;
+    }
+    ws.binaryType = "arraybuffer";
+
+    const finish = (cls) => {
+        // 终态：清空 onclose，避免随后的 ws.close() 触发 onclose 用无 cls 的 setOut
+        // 覆盖最终 ok/err 边框色(否则成功也不显示绿框)。close 仍会执行,只是不再改 UI class。
+        ws.onclose = null;
+        setOut("outWs", log.join("\n"), cls);
+        btn.disabled = false;
+    };
+
+    ws.onopen = () => {
+        push(t("dynWsConnected"));
+        ws.send(JSON.stringify({
+            text: document.getElementById("wsText").value,
+            engine: document.getElementById("wsEngine").value,
+            voice: document.getElementById("wsVoice").value.trim(),
+            speed: parseFloat(document.getElementById("wsSpeed").value) || 1.0,
+        }));
+    };
+    ws.onmessage = (e) => {
+        if (typeof e.data !== "string") {
+            bytes += e.data.byteLength;
+            chunks.push(new Int16Array(e.data));
+            return;
+        }
+        let meta;
+        try { meta = JSON.parse(e.data); } catch (_) { return; }
+        if (meta.type === "start") push("← start");
+        else if (meta.type === "seg") push(`← seg: ${JSON.stringify(meta.text)}`);
+        else if (meta.type === "error") {
+            push(`← error: ${meta.message}`);
+            try { ws.close(); } catch (_) {}
+            finish("err");
+        } else if (meta.type === "end") {
+            push(t("dynWsEnd")(bytes, (bytes / 2 / WS_SAMPLE_RATE).toFixed(2)));
+            try { ws.close(); } catch (_) {}
+            finish(playPcm(chunks, push) ? "ok" : "err");
+        }
+    };
+    ws.onerror = () => { push(t("dynWsError")); finish("err"); };
+    ws.onclose = () => { push(t("dynWsClosed")); finish("err"); };
+}
+
+function playPcm(chunks, push) {
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    if (!total) { push(t("dynNoAudio")); return false; }
+    const f32 = new Float32Array(total);
+    let off = 0;
+    for (const c of chunks) {
+        for (let i = 0; i < c.length; i++) f32[off + i] = c[i] / 32768;
+        off += c.length;
+    }
+    let ctx = null;
+    try {
+        ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: WS_SAMPLE_RATE });
+        const buf = ctx.createBuffer(1, total, WS_SAMPLE_RATE);
+        buf.copyToChannel(f32, 0);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        src.onended = () => { ctx.close().catch(() => {}); };
+        src.start();
+        push(t("dynPlaying"));
+        return true;
+    } catch (e) {
+        // 异常路径(如 createBuffer/start 抛错)：onended 不会触发,须就地关闭 ctx 避免泄漏
+        if (ctx) ctx.close().catch(() => {});
+        push(t("dynPlayFail") + e.message);
+        return false;
+    }
+}
+
+// 初始化：应用语言(默认英文)后加载密钥
+applyLang();
+loadKey();
+</script>
+</body>
+</html>

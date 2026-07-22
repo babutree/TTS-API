@@ -1,0 +1,174 @@
+/* 注意：@custom-variant dark 指令必须放在 index.html 内联 <style type="text/tailwindcss">，
+   Tailwind browser 引擎不扫描外部 CSS 文件中的指令。此处仅放纯 CSS。 */
+
+@keyframes float-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+.float-in { animation: float-in .5s cubic-bezier(.21,1.02,.73,1) both; }
+
+/* 不对 body 背景做 transition：背景含 radial-gradient(background-image 层)，
+   只过渡 background-color 会让渐变瞬切、底色慢变，叠加成「闪白」。直接瞬切最干净。 */
+
+/* 白天背景 */
+body {
+    background:
+        radial-gradient(1200px 600px at 12% -10%, rgba(56,189,248,.12), transparent 60%),
+        radial-gradient(1000px 700px at 100% 0%, rgba(168,85,247,.10), transparent 55%),
+        #f1f5f9;
+}
+/* 夜间背景 */
+html.dark body {
+    background:
+        radial-gradient(1200px 600px at 12% -10%, rgba(56,189,248,.14), transparent 60%),
+        radial-gradient(1000px 700px at 100% 0%, rgba(168,85,247,.14), transparent 55%),
+        #05070d;
+}
+
+/* 玻璃卡片：白天浅色、夜间深色 */
+.glass { background: rgba(255, 255, 255, 0.72); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); transition: background-color .3s ease; }
+html.dark .glass { background: rgba(17, 24, 39, 0.60); }
+
+::selection { background: rgba(56,189,248,.3); }
+html.dark ::selection { background: rgba(56,189,248,.5); }
+select, textarea { transition: border-color .2s, box-shadow .2s, background-color .2s; }
+select:focus, textarea:focus { border-color: rgb(56,189,248); box-shadow: 0 0 0 3px rgba(56,189,248,.15); }
+html.dark select:focus, html.dark textarea:focus { box-shadow: 0 0 0 3px rgba(56,189,248,.35); }
+html.dark select { background-color: #111827; color: #f1f5f9; border-color: #374151; }
+html.dark option { background-color: #1f2937; color: #f1f5f9; }
+#vizHint { transition: opacity .3s ease; }
+.seg { transition: all .2s; }
+.seg-active { background: rgba(56,189,248,.15); color: rgb(2,132,199); box-shadow: inset 0 0 0 1px rgba(56,189,248,.45); }
+html.dark .seg-active { color: rgb(125,211,252); box-shadow: inset 0 0 0 1px rgba(56,189,248,.4); }
+
+/* ============================================================
+   API 文档页 (api.html) 专属样式
+   全部作用域限定在 body.api-doc 下，避免裸元素选择器(h1/pre/table 等)
+   污染共用此表的 index.html 主 UI。深浅色跟随系统 prefers-color-scheme。
+   ============================================================ */
+body.api-doc {
+    --bg: #f1f5f9; --fg: #1e293b; --muted: #64748b;
+    --card: rgba(255,255,255,.72); --border: rgba(15,23,42,.08);
+    --code-bg: #f8fafc; --code-fg: #0f172a; --code-border: #e2e8f0;
+    --accent: #0284c7; --method: #0369a1; --method-bg: #e0f2fe;
+    --th-bg: #f1f5f9; --tr-border: #e2e8f0;
+    --input-bg: #ffffff; --input-border: #cbd5e1;
+    margin: 0; padding: 2rem 1rem;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.65; color: var(--fg);
+    background:
+        radial-gradient(1200px 600px at 12% -10%, rgba(56,189,248,.12), transparent 60%),
+        radial-gradient(1000px 700px at 100% 0%, rgba(168,85,247,.10), transparent 55%),
+        var(--bg);
+    min-height: 100vh;
+}
+@media (prefers-color-scheme: dark) {
+    body.api-doc {
+        --bg: #05070d; --fg: #e2e8f0; --muted: #94a3b8;
+        --card: rgba(17,24,39,.6); --border: rgba(255,255,255,.1);
+        --code-bg: #0f172a; --code-fg: #e2e8f0; --code-border: #1e293b;
+        --accent: #38bdf8; --method: #7dd3fc; --method-bg: rgba(56,189,248,.12);
+        --th-bg: rgba(255,255,255,.04); --tr-border: rgba(255,255,255,.08);
+        --input-bg: #0f172a; --input-border: #334155;
+    }
+}
+.api-doc * { box-sizing: border-box; }
+.api-doc .wrap {
+    position: relative;
+    max-width: 860px; margin: 0 auto;
+    background: var(--card); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    border: 1px solid var(--border); border-radius: 1.5rem;
+    padding: 2.5rem 2rem; box-shadow: 0 20px 50px rgba(0,0,0,.1);
+}
+.api-doc h1 { font-size: 1.6rem; margin: 0 0 .3rem; letter-spacing: -.02em; }
+/* 右上角工具区：语言切换 + GitHub */
+.api-doc .top-actions {
+    position: absolute; top: 1.6rem; right: 1.6rem;
+    display: flex; align-items: center; gap: .6rem;
+}
+.api-doc .lang-btn {
+    font-family: inherit; font-size: .8rem; font-weight: 600; cursor: pointer;
+    color: var(--muted); background: var(--code-bg); border: 1px solid var(--code-border);
+    border-radius: .5rem; padding: .3rem .6rem; transition: color .15s, border-color .15s;
+}
+.api-doc .lang-btn:hover { color: var(--accent); border-color: var(--accent); }
+.api-doc .gh-link { color: var(--muted); display: inline-flex; transition: color .15s; }
+.api-doc .gh-link:hover { color: var(--accent); }
+.api-doc h2 {
+    font-size: 1.15rem; margin: 2.2rem 0 .8rem; padding-top: 1.2rem;
+    border-top: 1px solid var(--border); letter-spacing: -.01em;
+}
+.api-doc h2:first-of-type { border-top: none; padding-top: 0; }
+.api-doc h3 { font-size: .95rem; margin: 1.2rem 0 .5rem; color: var(--muted); font-weight: 600; }
+.api-doc p, .api-doc li { color: var(--fg); }
+.api-doc .sub { color: var(--muted); margin: 0 0 1.5rem; font-size: .92rem; }
+.api-doc code {
+    font-family: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, monospace;
+    font-size: .86em; background: var(--code-bg); color: var(--code-fg);
+    padding: .12em .4em; border-radius: .35rem; border: 1px solid var(--code-border);
+}
+.api-doc pre {
+    background: var(--code-bg); border: 1px solid var(--code-border);
+    border-radius: .6rem; padding: 1rem 1.1rem; overflow-x: auto; margin: .6rem 0;
+}
+.api-doc pre code { background: none; border: none; padding: 0; font-size: .84rem; line-height: 1.55; }
+.api-doc .method {
+    display: inline-block; font-family: "SF Mono", Consolas, monospace;
+    font-size: .78rem; font-weight: 700; color: var(--method);
+    background: var(--method-bg); padding: .18em .6em; border-radius: .35rem;
+    margin-right: .5rem; letter-spacing: .03em; vertical-align: middle;
+}
+.api-doc .path {
+    font-family: "SF Mono", Consolas, monospace; font-size: .95rem;
+    font-weight: 600; vertical-align: middle;
+}
+.api-doc table { width: 100%; border-collapse: collapse; margin: .6rem 0; font-size: .88rem; }
+.api-doc th, .api-doc td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--tr-border); vertical-align: top; }
+.api-doc th { background: var(--th-bg); font-weight: 600; color: var(--muted); font-size: .82rem; text-transform: uppercase; letter-spacing: .03em; }
+.api-doc td code { white-space: nowrap; }
+.api-doc a { color: var(--accent); text-decoration: none; }
+.api-doc a:hover { text-decoration: underline; }
+.api-doc .pill {
+    display: inline-block; font-size: .75rem; padding: .1em .55em; border-radius: 1rem;
+    background: var(--method-bg); color: var(--method); font-weight: 600; margin-left: .4rem;
+}
+.api-doc .toc { font-size: .9rem; margin: 0 0 1rem; padding: .9rem 1.1rem; background: var(--code-bg); border: 1px solid var(--code-border); border-radius: .6rem; }
+.api-doc .toc a { margin-right: 1rem; white-space: nowrap; }
+.api-doc footer { margin-top: 2.5rem; padding-top: 1.2rem; border-top: 1px solid var(--border); color: var(--muted); font-size: .82rem; }
+
+/* ---- 接口测试器 ---- */
+.api-doc .tester { display: flex; flex-direction: column; gap: .9rem; margin: .8rem 0; }
+.api-doc .field { display: flex; flex-direction: column; gap: .35rem; }
+.api-doc .field label { font-size: .8rem; font-weight: 600; color: var(--muted); }
+.api-doc .field-row { display: flex; gap: .6rem; flex-wrap: wrap; }
+.api-doc .field-row .field { flex: 1; min-width: 120px; }
+.api-doc input, .api-doc select, .api-doc textarea {
+    font-family: inherit; font-size: .88rem; color: var(--fg);
+    background: var(--input-bg); border: 1px solid var(--input-border);
+    border-radius: .5rem; padding: .55rem .7rem; outline: none; width: 100%;
+    transition: border-color .2s, box-shadow .2s;
+}
+.api-doc textarea { resize: vertical; min-height: 70px; line-height: 1.5; }
+.api-doc input:focus, .api-doc select:focus, .api-doc textarea:focus {
+    border-color: var(--accent); box-shadow: 0 0 0 3px rgba(56,189,248,.15);
+}
+.api-doc .btn {
+    font-family: inherit; font-size: .85rem; font-weight: 600; cursor: pointer;
+    color: #fff; background: linear-gradient(135deg, #0ea5e9, #6366f1);
+    border: none; border-radius: .5rem; padding: .55rem 1.1rem;
+    transition: filter .15s, transform .1s;
+}
+.api-doc .btn:hover { filter: brightness(1.08); }
+.api-doc .btn:active { transform: scale(.97); }
+.api-doc .btn:disabled { opacity: .55; cursor: not-allowed; }
+.api-doc .btn-sm { padding: .4rem .8rem; font-size: .8rem; }
+.api-doc .out {
+    background: var(--code-bg); border: 1px solid var(--code-border);
+    border-radius: .6rem; padding: .8rem 1rem; margin-top: .3rem;
+    font-family: "SF Mono", Consolas, monospace; font-size: .8rem;
+    white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow: auto;
+    color: var(--code-fg); min-height: 1.5rem;
+}
+.api-doc .out:empty::before { content: attr(data-placeholder); color: var(--muted); }
+.api-doc .out.ok { border-color: rgba(16,185,129,.5); }
+.api-doc .out.err { border-color: rgba(244,63,94,.5); }
+.api-doc .row-inline { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.api-doc audio { width: 100%; margin-top: .5rem; }
+.api-doc .hint { font-size: .78rem; color: var(--muted); margin: .2rem 0 0; }

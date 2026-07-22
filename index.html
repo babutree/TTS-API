@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title id="docTitle">TTS-API</title>
+    <!-- 在 body 渲染前定好主题，避免首屏闪白(FOUC) -->
+    <script>
+        if (localStorage.getItem("theme") === "dark") {
+            document.documentElement.classList.add("dark");
+        }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <!-- Tailwind browser 引擎只处理内联 type="text/tailwindcss" 指令，dark 变体必须放这里 -->
+    <style type="text/tailwindcss">
+        @custom-variant dark (&:where(.dark, .dark *));
+    </style>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" href="/favicon.ico">
+</head>
+<body class="min-h-screen text-slate-800 dark:text-slate-100 flex items-center justify-center p-4 sm:p-6 font-sans antialiased">
+
+    <div class="w-full max-w-6xl glass rounded-3xl shadow-2xl border border-slate-900/5 dark:border-white/10 overflow-hidden float-in">
+
+        <!-- Header -->
+        <div class="px-5 sm:px-8 pt-5 sm:pt-6 pb-4 sm:pb-5 border-b border-slate-900/5 dark:border-white/10">
+            <div class="flex items-center gap-3">
+                <div class="h-10 w-10 shrink-0 rounded-2xl bg-gradient-to-br from-sky-400 to-indigo-500 flex items-center justify-center shadow-lg shadow-sky-500/20">
+                    <svg viewBox="0 0 24 24" class="h-5 w-5 text-white" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>
+                    </svg>
+                </div>
+                <div class="min-w-0">
+                    <h1 class="text-lg font-semibold text-slate-900 dark:text-white tracking-tight" data-i18n="title">TTS-API</h1>
+                    <p class="text-xs text-slate-500 dark:text-slate-300 hidden sm:block" data-i18n="subtitle">把文字变成自然的声音</p>
+                </div>
+                <div class="ml-auto flex items-center gap-3">
+                    <!-- GitHub 仓库 -->
+                    <a href="https://github.com/babutree/TTS-API" target="_blank" rel="noopener noreferrer" title="GitHub"
+                        class="h-8 w-8 rounded-lg flex items-center justify-center text-slate-500 dark:text-slate-200 bg-slate-900/5 dark:bg-white/10 hover:bg-slate-900/10 dark:hover:bg-white/20 transition-colors cursor-pointer">
+                        <svg viewBox="0 0 24 24" class="h-4 w-4" fill="currentColor" aria-hidden="true">
+                            <path d="M12 .5C5.73.5.5 5.73.5 12a11.5 11.5 0 0 0 7.86 10.92c.575.106.785-.25.785-.555 0-.274-.01-1.002-.015-1.967-3.196.695-3.87-1.54-3.87-1.54-.523-1.328-1.276-1.682-1.276-1.682-1.043-.713.08-.699.08-.699 1.153.081 1.76 1.184 1.76 1.184 1.026 1.758 2.692 1.25 3.348.956.104-.743.401-1.25.73-1.538-2.552-.29-5.236-1.276-5.236-5.68 0-1.255.448-2.28 1.183-3.084-.119-.29-.513-1.459.112-3.042 0 0 .965-.309 3.163 1.178a10.98 10.98 0 0 1 2.88-.388c.977.004 1.962.132 2.88.388 2.196-1.487 3.16-1.178 3.16-1.178.626 1.583.232 2.752.114 3.042.737.804 1.182 1.829 1.182 3.084 0 4.415-2.688 5.386-5.248 5.671.413.356.78 1.057.78 2.131 0 1.539-.014 2.779-.014 3.157 0 .308.207.667.79.554A11.5 11.5 0 0 0 23.5 12C23.5 5.73 18.27.5 12 .5z"/>
+                        </svg>
+                    </a>
+                    <!-- 界面语言切换 -->
+                    <button id="langBtn" onclick="toggleLang()" title="中文 / English" data-i18n-title="langTitle"
+                        class="h-8 px-2.5 rounded-lg flex items-center justify-center text-xs font-medium text-slate-500 dark:text-slate-200 bg-slate-900/5 dark:bg-white/10 hover:bg-slate-900/10 dark:hover:bg-white/20 transition-colors cursor-pointer">
+                        <span id="langLabel">EN</span>
+                    </button>
+                    <!-- 主题切换 -->
+                    <button id="themeBtn" onclick="toggleTheme()" title="切换白天 / 夜间" data-i18n-title="themeTitle"
+                        class="h-8 w-8 rounded-lg flex items-center justify-center text-slate-500 dark:text-slate-200 bg-slate-900/5 dark:bg-white/10 hover:bg-slate-900/10 dark:hover:bg-white/20 transition-colors cursor-pointer">
+                        <!-- 太阳(白天显示) -->
+                        <svg id="iconSun" viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+                        </svg>
+                        <!-- 月亮(夜间显示) -->
+                        <svg id="iconMoon" viewBox="0 0 24 24" class="h-4 w-4 hidden" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                        </svg>
+                    </button>
+                    <div class="flex items-center gap-2 text-xs">
+                        <span id="statusDot" class="h-2 w-2 rounded-full bg-slate-400 dark:bg-slate-500 transition-colors"></span>
+                        <span id="statusText" class="text-slate-500 dark:text-slate-300">待机</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Body: 左右两栏，文本框占主导 -->
+        <div class="p-5 sm:p-8 grid grid-cols-1 lg:grid-cols-3 gap-5 sm:gap-8">
+
+            <!-- 左栏：文本输入(占 2/3) -->
+            <div class="lg:col-span-2 flex flex-col gap-2">
+                <div class="flex items-center justify-between">
+                    <label class="text-xs font-medium text-slate-500 dark:text-slate-300 uppercase tracking-wide" data-i18n="textLabel">文本内容</label>
+                    <span id="charCount" class="text-xs text-slate-400 dark:text-slate-400 tabular-nums">0 字</span>
+                </div>
+                <textarea id="t" data-i18n-ph="placeholder"
+                    class="w-full flex-1 min-h-[200px] sm:min-h-[340px] rounded-xl border border-slate-300 dark:border-white/15 bg-white/60 dark:bg-white/5 p-4 text-base sm:text-sm leading-relaxed text-slate-800 dark:text-slate-100 outline-none resize-none placeholder:text-slate-400 dark:placeholder:text-slate-500"
+                    placeholder="在这里粘贴想要朗读的文字，长文也可以…">你好，这是一个把文字变成语音的小工具。Hello, this is a handy tool for converting text into speech. 直接点击下面的朗读按钮，就能听到这段示例文字的声音。Simply click the Read Aloud button below to hear this sample text spoken. 你也可以把这里的内容换成自己想听的文字，再选择喜欢的音色和语速。You can also replace the content with your own text and choose your preferred voice and speaking speed. Enjoy the seamless experience!</textarea>
+            </div>
+
+            <!-- 右栏：设置(占 1/3) -->
+            <div class="lg:col-span-1 flex flex-col gap-5">
+                <div class="flex flex-col gap-2">
+                    <label class="text-xs font-medium text-slate-500 dark:text-slate-300 uppercase tracking-wide" data-i18n="engineLabel">合成方式</label>
+                    <select id="engine" onchange="updateVoices()"
+                        class="w-full rounded-xl border border-slate-300 dark:border-white/15 bg-white/60 dark:bg-white/5 p-3 text-sm text-slate-800 dark:text-slate-100 outline-none cursor-pointer">
+                        <option value="auto" data-i18n="engineAuto">Auto · 智能路由</option>
+                        <option value="kokoro" data-i18n="engineKokoro">Kokoro · 本机合成</option>
+                        <option value="edge" data-i18n="engineEdge">Edge · 微软在线</option>
+                    </select>
+                </div>
+                <div id="voiceSingle" class="flex flex-col gap-2">
+                    <label class="text-xs font-medium text-slate-500 dark:text-slate-300 uppercase tracking-wide" data-i18n="voiceLabel">音色</label>
+                    <select id="voice"
+                        class="w-full rounded-xl border border-slate-300 dark:border-white/15 bg-white/60 dark:bg-white/5 p-3 text-sm text-slate-800 dark:text-slate-100 outline-none cursor-pointer"></select>
+                </div>
+                <div id="voiceAuto" class="hidden flex flex-col gap-3">
+                    <div class="flex flex-col gap-2">
+                        <label class="text-xs font-medium text-slate-500 dark:text-slate-300 uppercase tracking-wide" data-i18n="voiceZhLabel">中文音色</label>
+                        <select id="voiceZh"
+                            class="w-full rounded-xl border border-slate-300 dark:border-white/15 bg-white/60 dark:bg-white/5 p-3 text-sm text-slate-800 dark:text-slate-100 outline-none cursor-pointer"></select>
+                    </div>
+                    <div class="flex flex-col gap-2">
+                        <label class="text-xs font-medium text-slate-500 dark:text-slate-300 uppercase tracking-wide" data-i18n="voiceEnLabel">英文音色</label>
+                        <select id="voiceEnAuto"
+                            class="w-full rounded-xl border border-slate-300 dark:border-white/15 bg-white/60 dark:bg-white/5 p-3 text-sm text-slate-800 dark:text-slate-100 outline-none cursor-pointer"></select>
+                    </div>
+                    <p class="text-[11px] text-slate-400 dark:text-slate-500 leading-relaxed" data-i18n="autoHint">按句自动识别语言：中文句用中文音色、英文句用英文音色，无缝衔接</p>
+                </div>
+                <div class="flex flex-col gap-2">
+                    <label class="text-xs font-medium text-slate-500 dark:text-slate-300 uppercase tracking-wide" data-i18n="speedLabel">语速</label>
+                    <div id="speedGroup" class="grid grid-cols-6 gap-1.5 p-1 rounded-xl bg-slate-200/60 dark:bg-white/5 border border-slate-300 dark:border-white/15">
+                        <button data-speed="0.5"  class="seg rounded-lg py-2 text-sm font-medium text-slate-500 dark:text-slate-300 hover:text-slate-800 dark:hover:text-white">0.5x</button>
+                        <button data-speed="0.75" class="seg rounded-lg py-2 text-sm font-medium text-slate-500 dark:text-slate-300 hover:text-slate-800 dark:hover:text-white">0.75x</button>
+                        <button data-speed="1.0"  class="seg seg-active rounded-lg py-2 text-sm font-medium text-slate-700 dark:text-slate-100">1.0x</button>
+                        <button data-speed="1.25" class="seg rounded-lg py-2 text-sm font-medium text-slate-500 dark:text-slate-300 hover:text-slate-800 dark:hover:text-white">1.25x</button>
+                        <button data-speed="1.5"  class="seg rounded-lg py-2 text-sm font-medium text-slate-500 dark:text-slate-300 hover:text-slate-800 dark:hover:text-white">1.5x</button>
+                        <button data-speed="2.0"  class="seg rounded-lg py-2 text-sm font-medium text-slate-500 dark:text-slate-300 hover:text-slate-800 dark:hover:text-white">2.0x</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 底部：波形 + 播放控制条(整行) -->
+        <div class="px-5 sm:px-8 pb-5 sm:pb-8 flex flex-col gap-4">
+            <!-- Visualizer -->
+            <div class="relative rounded-xl border border-slate-300 dark:border-white/15 bg-white/40 dark:bg-white/5 overflow-hidden">
+                <canvas id="viz" class="w-full block" style="height:72px"></canvas>
+                <div id="vizHint" class="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <span class="text-xs text-slate-400 dark:text-slate-500" data-i18n="vizHint">点击「朗读」后，这里会显示声音的波形</span>
+                </div>
+            </div>
+
+            <!-- 控制条 -->
+            <div class="flex flex-col sm:flex-row gap-3">
+                <!-- 朗读(主操作) -->
+                <button id="speakBtn" onclick="start()"
+                    class="sm:flex-1 bg-gradient-to-r from-sky-500 to-indigo-500 hover:from-sky-400 hover:to-indigo-400 text-white font-medium py-3 rounded-xl transition-all shadow-lg shadow-sky-500/20 active:scale-[.98] flex items-center justify-center gap-2">
+                    <svg viewBox="0 0 24 24" class="h-4 w-4" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                    <span data-i18n="speak">朗读</span>
+                </button>
+                <button id="previewBtn" onclick="previewVoice()" title="试听音色" data-i18n-title="previewTitle"
+                    class="sm:w-auto px-5 bg-slate-900/5 dark:bg-white/10 hover:bg-slate-900/10 dark:hover:bg-white/20 text-slate-700 dark:text-slate-100 font-medium py-3 rounded-xl transition-all border border-slate-300 dark:border-white/15 active:scale-[.98] flex items-center justify-center gap-2">
+                    <svg viewBox="0 0 24 24" class="h-4 w-4" fill="currentColor"><path d="M11 5L6 9H2v6h4l5 4V5zm4.5 3.5a1 1 0 0 0-1.4 1.4 3 3 0 0 1 0 4.2 1 1 0 0 0 1.4 1.4 5 5 0 0 0 0-7z"/></svg>
+                    <span class="text-sm" data-i18n="previewBtn">试听</span>
+                </button>
+
+                <!-- 后退 / 暂停继续 / 前进 -->
+                <div class="flex gap-2 sm:flex-1">
+                    <button onclick="seek(-10)" title="后退 10 秒" data-i18n-title="seekBack"
+                        class="flex-1 bg-slate-900/5 dark:bg-white/10 hover:bg-slate-900/10 dark:hover:bg-white/20 text-slate-700 dark:text-slate-100 font-medium py-3 rounded-xl transition-all border border-slate-300 dark:border-white/15 active:scale-[.98] flex items-center justify-center gap-1.5">
+                        <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 18l-7-6 7-6M20 18l-7-6 7-6"/></svg>
+                        <span class="text-sm">10s</span>
+                    </button>
+                    <button id="playPauseBtn" onclick="togglePlay()"
+                        class="flex-1 bg-slate-900/5 dark:bg-white/10 hover:bg-slate-900/10 dark:hover:bg-white/20 text-slate-700 dark:text-slate-100 font-medium py-3 rounded-xl transition-all border border-slate-300 dark:border-white/15 active:scale-[.98] flex items-center justify-center gap-1.5">
+                        <svg id="iconPause" viewBox="0 0 24 24" class="h-4 w-4" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+                        <svg id="iconResume" viewBox="0 0 24 24" class="h-4 w-4 hidden" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                        <span id="playPauseText" class="text-sm">暂停</span>
+                    </button>
+                    <button onclick="seek(10)" title="前进 10 秒" data-i18n-title="seekFwd"
+                        class="flex-1 bg-slate-900/5 dark:bg-white/10 hover:bg-slate-900/10 dark:hover:bg-white/20 text-slate-700 dark:text-slate-100 font-medium py-3 rounded-xl transition-all border border-slate-300 dark:border-white/15 active:scale-[.98] flex items-center justify-center gap-1.5">
+                        <span class="text-sm">10s</span>
+                        <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 18l7-6-7-6M4 18l7-6-7-6"/></svg>
+                    </button>
+                </div>
+
+                <!-- 停止 -->
+                <button onclick="stop()" title="停止" data-i18n-title="stopTitle"
+                    class="sm:w-auto px-5 bg-slate-900/5 dark:bg-white/10 hover:bg-rose-500/10 hover:text-rose-500 dark:hover:text-rose-400 text-slate-700 dark:text-slate-100 font-medium py-3 rounded-xl transition-all border border-slate-300 dark:border-white/15 active:scale-[.98] flex items-center justify-center gap-2">
+                    <svg viewBox="0 0 24 24" class="h-4 w-4" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                    <span class="text-sm" data-i18n="stopBtn">停止</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+<script>
+// ============================================================
+// 主题切换 —— 默认白天，可手动切换并记忆
+// ============================================================
+function applyTheme(theme) {
+    const isDark = theme === "dark";
+    document.documentElement.classList.toggle("dark", isDark);
+    document.getElementById("iconSun").classList.toggle("hidden", isDark);
+    document.getElementById("iconMoon").classList.toggle("hidden", !isDark);
+}
+function toggleTheme() {
+    const next = document.documentElement.classList.contains("dark") ? "light" : "dark";
+    localStorage.setItem("theme", next);
+    applyTheme(next);
+}
+// .dark 类已由 <head> 阻塞脚本设好(避免 FOUC)，这里仅同步图标显隐
+applyTheme(document.documentElement.classList.contains("dark") ? "dark" : "light");
+
+// ============================================================
+// 界面语言 —— 中/英切换，记忆到 localStorage
+// ============================================================
+const I18N = {
+    zh: {
+        docTitle: "TTS-API",
+        subtitle: "把文字变成自然的声音",
+        textLabel: "文本内容",
+        engineLabel: "合成方式",
+        engineAuto: "Auto · 智能路由",
+        engineKokoro: "Kokoro · 本机合成",
+        engineEdge: "Edge · 微软在线",
+        voiceLabel: "音色",
+        voiceZhLabel: "中文音色",
+        voiceEnLabel: "英文音色",
+        previewBtn: "试听",
+        previewTitle: "试听当前音色",
+        autoHint: "按句自动识别语言：中文句用中文音色、英文句用英文音色，无缝衔接",
+        speedLabel: "语速",
+        vizHint: "点击「朗读」后，这里会显示声音的波形",
+        speak: "朗读",
+        pause: "暂停",
+        resume: "继续",
+        stopBtn: "停止",
+        title: "TTS-API",
+        themeTitle: "切换白天 / 夜间",
+        langTitle: "中文 / English",
+        seekBack: "后退 10 秒",
+        seekFwd: "前进 10 秒",
+        stopTitle: "停止",
+        placeholder: "在这里粘贴想要朗读的文字，长文也可以…",
+        charUnit: "字",
+        st_idle: "待机", st_connecting: "连接中", st_streaming: "合成中",
+        st_playing: "播放中", st_paused: "已暂停", st_done: "完成", st_error: "出错",
+        vf: "女声", vm: "男声",
+        tagLocal: "本地", tagOnline: "在线",
+    },
+    en: {
+        docTitle: "TTS-API",
+        subtitle: "Turn text into natural speech",
+        textLabel: "Text",
+        engineLabel: "Engine",
+        engineAuto: "Auto · Smart routing",
+        engineKokoro: "Kokoro · On-device",
+        engineEdge: "Edge · Microsoft online",
+        voiceLabel: "Voice",
+        voiceZhLabel: "Chinese voice",
+        voiceEnLabel: "English voice",
+        previewBtn: "Preview",
+        previewTitle: "Preview current voice",
+        autoHint: "Auto-detects language per sentence: Chinese uses the Chinese voice, English uses the English voice, seamlessly.",
+        speedLabel: "Speed",
+        vizHint: "After clicking Read, the waveform appears here",
+        speak: "Read",
+        pause: "Pause",
+        resume: "Resume",
+        stopBtn: "Stop",
+        title: "TTS-API",
+        themeTitle: "Toggle light / dark",
+        langTitle: "中文 / English",
+        seekBack: "Back 10s",
+        seekFwd: "Forward 10s",
+        stopTitle: "Stop",
+        placeholder: "Paste the text you want read aloud, long text is fine…",
+        charUnit: "chars",
+        st_idle: "Idle", st_connecting: "Connecting", st_streaming: "Synthesizing",
+        st_playing: "Playing", st_paused: "Paused", st_done: "Done", st_error: "Error",
+        vf: "Female", vm: "Male",
+        tagLocal: "Local", tagOnline: "Online",
+    },
+};
+let currentLang = localStorage.getItem("lang") === "zh" ? "zh" : "en";
+
+function t(key) { return (I18N[currentLang] && I18N[currentLang][key]) || key; }
+
+// 应用语言到所有静态标注元素 + 动态文本
+function applyLang() {
+    const dict = I18N[currentLang];
+    document.querySelectorAll("[data-i18n]").forEach(el => {
+        const k = el.getAttribute("data-i18n");
+        if (dict[k] !== undefined) el.textContent = dict[k];
+    });
+    document.querySelectorAll("[data-i18n-title]").forEach(el => {
+        const k = el.getAttribute("data-i18n-title");
+        if (dict[k] !== undefined) el.setAttribute("title", dict[k]);
+    });
+    document.querySelectorAll("[data-i18n-ph]").forEach(el => {
+        const k = el.getAttribute("data-i18n-ph");
+        if (dict[k] !== undefined) el.setAttribute("placeholder", dict[k]);
+    });
+    document.documentElement.lang = currentLang === "en" ? "en" : "zh-CN";
+    document.title = t("docTitle");
+    document.getElementById("langLabel").textContent = currentLang === "zh" ? "EN" : "中";
+    // 动态文本随语言刷新
+    updateVoices();
+    updateCharCount();
+    updatePlayBtn();
+    if (lastStatus) setStatus(lastStatus);
+}
+function toggleLang() {
+    currentLang = currentLang === "zh" ? "en" : "zh";
+    localStorage.setItem("lang", currentLang);
+    applyLang();
+}
+
+// ============================================================
+// 音色映射表
+// ============================================================
+// 音色元数据(语言无关)：gender 为 i18n 键(vf/vm)，name 为专名(不翻译)，region 为 CN/US/UK。
+// label 运行时按当前界面语言用 t(gender) 拼出，随语言切换刷新。
+// 单一事实源为后端 /api/voices：页面加载时拉取全部音色填充下拉，避免前后端列表漂移。
+// kokoro 为固定列表(全量)；edge 为微软动态列表(数百个)，按主流 locale 白名单精简。
+const EDGE_LOCALE_WHITELIST = ["zh-CN", "en-US", "en-GB"];
+let voiceDatabase = { kokoro: [], edge: [] };
+// 音色目录是否就绪：/api/voices 成功且非空才置真。未就绪禁止发起合成，避免发空/无效 voice。
+let voicesReady = false;
+let voicesLoadError = false;
+let voicesPromise = null;
+
+// 后端 gender → 前端 i18n 键(vf/vm)：区域另由 region 字段承载，性别只分男女
+function toGenderKey(rawGender) {
+    return String(rawGender || "").toLowerCase().startsWith("f") ? "vf" : "vm";
+}
+
+// locale → 短区域码(US/UK/CN)，避免微软 FriendlyName 里 "United States" 之类冗长文案
+const LOCALE_SHORT = { "en-US": "US", "en-GB": "UK", "zh-CN": "CN" };
+
+// 从 Edge ShortName(如 en-US-AvaNeural)解析干净专名 Ava；微软 FriendlyName 太长且含
+// "Online...(Natural) - English (United States)"，与前端 "在线" tag 重复，故弃用。
+function parseEdgeName(shortName) {
+    const m = String(shortName || "").match(/^[a-z]{2}-[A-Z]{2}-(.+?)(?:Neural|Multilingual.*)?$/);
+    return m ? m[1] : shortName;
+}
+
+// 拉取后端音色目录，映射为前端结构后刷新下拉。失败则保持空列表并提示，不静默伪装。
+// 统一模型 { value, gender(vf/vm), name(专名), region(CN/US/UK) }。
+async function loadVoices() {
+    const resp = await fetch("/api/voices");
+    if (!resp.ok) throw new Error("获取音色失败: HTTP " + resp.status);
+    const data = await resp.json();
+    voiceDatabase.kokoro = (data.kokoro || []).map(v => ({
+        value: v.id,
+        gender: toGenderKey(v.gender),
+        name: v.name,
+        region: v.language === "en" ? "US" : "CN",   // Kokoro 英文为美音、中文为普通话
+    }));
+    voiceDatabase.edge = (data.edge || [])
+        .filter(v => EDGE_LOCALE_WHITELIST.includes(v.locale))
+        .map(v => ({
+            value: v.id,
+            gender: toGenderKey(v.gender),
+            name: parseEdgeName(v.id),
+            region: LOCALE_SHORT[v.locale] || v.locale,
+        }));
+    updateVoices();
+    voicesReady = true;
+    voicesLoadError = false;
+    return voiceDatabase;
+}
+
+// 音色显示 label(随界面语言)：性别 · 专名 · 区域。统一命名规范，各引擎一致。
+function voiceLabel(v) { return `${t(v.gender)} · ${v.name} · ${v.region}`; }
+
+// 音色 → 引擎：本地 Kokoro 前缀 zf_/zm_/af_/am_，其余为 Edge 在线
+function engineOfVoice(voice) {
+    return voiceDatabase.kokoro.some(v => v.value === voice) ? "kokoro" : "edge";
+}
+
+// 句级切分：与后端 split_text 严格同规则(单一事实源)。
+// 英文句末标点后须跟空格 " +" 才切(保护 3.14/U.S.A/省略号)；中文句末标点零宽后切；换行直接切。
+// 注意用 " +"(单空格)而非 "\s+"：后端是 " +"，用 \s+ 会在"标点后跟 tab/回车"时与后端切句结果漂移。
+function splitSentences(text) {
+    return text
+        .split(/(?<=[.!?。！？]) +|(?<=[。！？])|\n+/)
+        .map(s => s.trim())
+        .filter(Boolean);
+}
+
+// 把一句话按语言边界切成子片段。铁律：Kokoro 每个 pipeline 单语言，中文 pipeline 连
+// DNS 这类孤立英文缩写都读错(官方 lang_code 必须匹配 voice)。故绝不把英文合并进中文段，
+// 一律按语言路由到对应音色——英文(含术语/缩写)全部走英文音色。非字母(标点/空格/数字)
+// 归并到前一段，保持标点与语流。返回 [{ text, isZh }]，相邻同语言已合并。
+function splitByLanguage(text) {
+    const segs = [];
+    let cur = '';
+    let curZh = null;
+    for (const ch of text) {
+        const isLetter = /[\u4e00-\u9fffA-Za-z]/.test(ch);
+        if (!isLetter) { cur += ch; continue; }
+        const isZh = /[\u4e00-\u9fff]/.test(ch);
+        if (curZh === null || isZh === curZh) {
+            curZh = isZh;
+            cur += ch;
+        } else {
+            if (cur.trim()) segs.push({ text: cur.trim(), isZh: curZh });
+            cur = ch;
+            curZh = isZh;
+        }
+    }
+    if (cur.trim()) segs.push({ text: cur.trim(), isZh: curZh ?? false });
+
+    // 合并相邻同语言段(切分过程中非字母字符可能造成同语言相邻)
+    const merged = [];
+    for (const seg of segs) {
+        const last = merged[merged.length - 1];
+        if (last && last.isZh === seg.isZh) {
+            last.text += seg.text;
+        } else {
+            merged.push(seg);
+        }
+    }
+    return merged;
+}
+
+// 某语言的默认 Kokoro 音色：voiceDatabase.kokoro 中该语言(按 region)的首个音色。
+// 用于混排文本里"另一语言"的兜底路由，避免硬编码可能不存在的 ID。
+function defaultKokoroVoice(isZh) {
+    const region = isZh ? "CN" : "US";
+    const v = voiceDatabase.kokoro.find(x => x.region === region);
+    return v ? v.value : null;
+}
+
+// 把整篇文本解析为句级列表，每句标注目标 (engine, voice)。单一事实源。
+// 铁律：Kokoro 每个 pipeline 单语言，中文/英文文本必须各走对应语言音色，否则读错(连 DNS 都错)。
+// - Auto：按句切→按语言切子片段，中文段用中文音色、英文段用英文音色。
+// - Kokoro 单音色：同样按语言切；选中音色读其本语言，另一语言用同引擎默认音色兜底(不丢词)。
+// - Edge：多语言引擎，整段单音色，不分段。
+// 返回 [{ engine, voice, text }]
+function computeSentences() {
+    const engineSel = document.getElementById("engine").value;
+    const sentences = splitSentences(textArea.value);
+
+    if (engineSel === "edge") {
+        // Edge 原生多语言，整段交给选中音色，不按语言拆分
+        const voice = document.getElementById("voice").value;
+        return sentences.map(s => ({ engine: "edge", voice, text: s }));
+    }
+
+    if (engineSel === "kokoro") {
+        // Kokoro 单音色：按语言分段。选中音色负责其本语言，另一语言用同引擎默认音色。
+        const picked = document.getElementById("voice").value;
+        const pickedIsZh = (voiceDatabase.kokoro.find(v => v.value === picked) || {}).region === "CN";
+        const out = [];
+        for (const s of sentences) {
+            for (const seg of splitByLanguage(s)) {
+                // 段语言 == 选中音色语言 → 用选中音色；否则用另一语言的默认 Kokoro 音色兜底
+                const voice = (seg.isZh === pickedIsZh) ? picked : (defaultKokoroVoice(seg.isZh) || picked);
+                out.push({ engine: "kokoro", voice, text: seg.text });
+            }
+        }
+        return out;
+    }
+
+    // Auto：逐句判定语言，中文段用中文音色、英文段用英文音色(可跨引擎)
+    const zhVoice = document.getElementById("voiceZh").value;
+    const enVoice = document.getElementById("voiceEnAuto").value;
+    const out = [];
+    for (const s of sentences) {
+        for (const seg of splitByLanguage(s)) {
+            const voice = seg.isZh ? zhVoice : enVoice;
+            out.push({ engine: engineOfVoice(voice), voice, text: seg.text });
+        }
+    }
+    return out;
+}
+
+// 从句级列表的 startIdx 起，把连续同 (engine,voice) 的句子合并为运行段(run)。
+// 每个 run 记录 startSentence(在 allSentences 中的起始下标)与 count(覆盖句数)，
+// 供变速时按句定位与续播。text 用 \n 连接(后端按 \n 还原切句)。
+function buildRunsFrom(startIdx) {
+    const runs = [];
+    for (let i = startIdx; i < allSentences.length; i++) {
+        const item = allSentences[i];
+        const last = runs[runs.length - 1];
+        if (last && last.engine === item.engine && last.voice === item.voice) {
+            last.text += "\n" + item.text;
+            last.count++;
+        } else {
+            runs.push({
+                engine: item.engine,
+                voice: item.voice,
+                text: item.text,
+                startSentence: i,
+                count: 1,
+            });
+        }
+    }
+    return runs;
+}
+
+function selectedVoicesReady() {
+    const engine = document.getElementById("engine").value;
+    if (engine === "auto") {
+        return Boolean(document.getElementById("voiceZh").value && document.getElementById("voiceEnAuto").value);
+    }
+    return Boolean(document.getElementById("voice").value);
+}
+
+function selectedPreviewVoice() {
+    const engine = document.getElementById("engine").value;
+    if (engine === "auto") {
+        const voice = document.getElementById("voiceZh").value || document.getElementById("voiceEnAuto").value;
+        return { engine: engineOfVoice(voice), voice };
+    }
+    const voice = document.getElementById("voice").value;
+    return { engine: engineOfVoice(voice), voice };
+}
+
+async function previewVoice() {
+    if (!voicesReady) {
+        try {
+            voicesPromise = voicesPromise || loadVoices();
+            await voicesPromise;
+        } catch (err) {
+            console.error(err);
+            setStatus("error");
+            return;
+        }
+    }
+    const picked = selectedPreviewVoice();
+    if (!picked.voice) { setStatus("error"); return; }
+    if (!ctx) initAudio();
+    if (ctx.state === "suspended") { ctx.resume().catch(() => {}); }
+    const params = new URLSearchParams({ engine: picked.engine, voice: picked.voice, speed: String(currentSpeed) });
+    try {
+        const resp = await fetch(`/api/voices/preview?${params.toString()}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const arrayBuffer = await resp.arrayBuffer();
+        const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+        stopAllSources();
+        const src = ctx.createBufferSource();
+        src.buffer = audioBuffer;
+        src.connect(ctx.destination);
+        src.start();
+        sources.push(src);
+        src.onended = () => { sources = sources.filter(s => s !== src); };
+    } catch (err) {
+        console.error(err);
+        setStatus("error");
+    }
+}
+
+function updateVoices() {
+    const engine = document.getElementById("engine").value;
+    const voiceSingle = document.getElementById("voiceSingle");
+    const voiceAuto = document.getElementById("voiceAuto");
+
+    voiceSingle.classList.toggle("hidden", engine === "auto");
+    voiceAuto.classList.toggle("hidden", engine !== "auto");
+
+    if (engine === "auto") {
+        // 中文音色 / 英文音色 各汇总两引擎的对应语言音色，Edge 在线在前(默认选中,发音更自然)
+        const mixedSel = document.getElementById("voiceZh");
+        const enSel = document.getElementById("voiceEnAuto");
+        const oldZh = mixedSel.value;
+        const oldEn = enSel.value;
+        mixedSel.innerHTML = '';
+        enSel.innerHTML = '';
+        const isZhVoice = v => v.region === "CN";
+        const addOpt = (sel, v, tag) => {
+            const opt = document.createElement('option');
+            opt.value = v.value;
+            opt.textContent = `${voiceLabel(v)} · ${tag}`;
+            sel.appendChild(opt);
+        };
+        // Edge 在线优先(默认选中项 = 列表首项 = 在线,发音更标准自然)
+        voiceDatabase.edge.forEach(v => addOpt(isZhVoice(v) ? mixedSel : enSel, v, t("tagOnline")));
+        voiceDatabase.kokoro.forEach(v => addOpt(isZhVoice(v) ? mixedSel : enSel, v, t("tagLocal")));
+        if ([...mixedSel.options].some(o => o.value === oldZh)) mixedSel.value = oldZh;
+        if ([...enSel.options].some(o => o.value === oldEn)) enSel.value = oldEn;
+    } else {
+        const sel = document.getElementById("voice");
+        const old = sel.value;
+        sel.innerHTML = '';
+        voiceDatabase[engine].forEach(v => {
+            const opt = document.createElement('option');
+            opt.value = v.value;
+            opt.textContent = voiceLabel(v);
+            sel.appendChild(opt);
+        });
+        if ([...sel.options].some(o => o.value === old)) sel.value = old;
+    }
+}
+updateVoices();
+
+// 语速分段控件
+let currentSpeed = 1.0;
+document.getElementById("speedGroup").addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    currentSpeed = parseFloat(btn.dataset.speed);
+    document.querySelectorAll("#speedGroup button").forEach(b => {
+        const on = b === btn;
+        b.classList.toggle("seg-active", on);
+        b.classList.toggle("text-slate-500", !on);
+        b.classList.toggle("dark:text-slate-300", !on);
+        b.classList.toggle("text-slate-700", on);
+        b.classList.toggle("dark:text-slate-100", on);
+    });
+    // 播放中或暂停中点倍速 → 从当前句起用新速度续播(Bug5-A:保留位置,不从头)
+    if (ws && (isPlaying || isPaused)) {
+        restartFromCurrentSentence();
+    }
+});
+
+// 变速续播(Bug5-A)：定位当前播放头所在句 → 截断 buffer 到该句起点(保留已播句以支持
+// 后退) → 从该句起用新速度重建 run 队列并续播。无法在句中切速度(音频已固化),故按句粒度。
+function restartFromCurrentSentence() {
+    const headSample = Math.round(getHead() * SAMPLE_RATE);
+    // timeline 按 startSample 递增；找到起点 <= 播放头的最后一句
+    let k = 0;
+    for (let i = 0; i < timeline.length; i++) {
+        if (timeline[i].startSample <= headSample) k = i;
+        else break;
+    }
+    const cut = timeline[k] ? timeline[k].startSample : 0;
+    const sentenceIdx = timeline[k] ? timeline[k].sentenceIndex : 0;
+    const wasPaused = isPaused;   // 暂停态点变速：重合成后仍保持暂停，不强制起播(Bug5)
+
+    try { ws.onclose = null; ws.onerror = null; ws.close(); } catch (_) {}
+    ws = null;
+    stopAllSources();
+
+    // 截断到当前句起点：已播句(0..cut)保留支持后退，当前句及之后丢弃待新速度重合成
+    writePos = cut;
+    scheduledPos = cut;
+    timeline = timeline.slice(0, k);   // 当前句要重合成,删掉它及之后的时间线
+    runQueue = buildRunsFrom(sentenceIdx);
+    runIndex = 0;
+    segWithinRun = 0;
+
+    anchorSet = false;
+    pendingLead = 0.08;
+    pausedHead = cut / SAMPLE_RATE;
+    // 暂停态：isPlaying=false,新音频只进 buffer 不起播,等用户点继续(startPlayback 从 cut 起新速度)
+    isPlaying = !wasPaused;
+    isPaused = wasPaused;
+    streamEnded = false;
+    setStatus(wasPaused ? "paused" : "streaming");
+    updatePlayBtn();
+    sendRequest();
+}
+
+// 字数统计
+const textArea = document.getElementById("t");
+const charCount = document.getElementById("charCount");
+function updateCharCount() {
+    charCount.textContent = `${textArea.value.length} ${t("charUnit")}`;
+}
+textArea.addEventListener("input", updateCharCount);
+updateCharCount();
+
+// 示例文案作为真实 value(未编辑直接点朗读即播放示例)；用户首次聚焦时清空一次,
+// 之后当普通输入框。isDemo 标记仅在用户未动过示例前为真。
+let isDemo = true;
+function clearDemoOnce() {
+    if (!isDemo) return;
+    isDemo = false;
+    textArea.value = "";
+    updateCharCount();
+}
+textArea.addEventListener("focus", clearDemoOnce, { once: true });
+// 用户真正输入过就不再视为示例(防止聚焦后未清空的边缘情况)
+textArea.addEventListener("input", () => { isDemo = false; });
+
+// 状态指示。颜色与语言无关，文案随界面语言(t)刷新；lastStatus 供切语言时复刷。
+let lastStatus = "idle";
+function setStatus(state) {
+    lastStatus = state;
+    const dot = document.getElementById("statusDot");
+    const txt = document.getElementById("statusText");
+    const colorMap = {
+        idle:      "bg-slate-400 dark:bg-slate-500",
+        connecting:"bg-amber-400 animate-pulse",
+        streaming: "bg-emerald-400 animate-pulse",
+        playing:   "bg-sky-400 animate-pulse",
+        paused:    "bg-amber-400",
+        done:      "bg-emerald-500",
+        error:     "bg-rose-500"
+    };
+    dot.className = "h-2 w-2 rounded-full transition-colors " + colorMap[state];
+    txt.textContent = t("st_" + state);
+}
+
+// 暂停 / 继续 按钮：仅用户主动暂停时显示“继续”，其余(默认/播放/停止/完成)显示“暂停”
+function updatePlayBtn() {
+    document.getElementById("iconPause").classList.toggle("hidden", isPaused);
+    document.getElementById("iconResume").classList.toggle("hidden", !isPaused);
+    document.getElementById("playPauseText").textContent = isPaused ? t("resume") : t("pause");
+}
+
+// ============================================================
+// 音频引擎 —— 累积全部 PCM + 按播放头调度
+// 支持：无缝(gapless)流式、暂停/继续、前进/后退 10 秒
+// ============================================================
+const SAMPLE_RATE = 24000;
+const LEAD_TIME = 0.15;   // 首次起播预缓冲，吸收网络抖动(秒)
+
+let ws = null;
+let ctx = null;
+let masterGain = null;
+let analyser = null;
+
+// 累积缓冲：保留全部已合成样本，以支持任意位置跳转
+let buffer = new Float32Array(SAMPLE_RATE * 30);  // 初始 30 秒，按需倍增
+let writePos = 0;          // 已写入(已合成)样本数
+let scheduledPos = 0;      // 已调度到的样本位置
+let sources = [];          // 已排入时间轴的音源(供暂停/跳转时取消)
+
+// 播放头锚点：head(秒) = anchorHead + (ctx.currentTime - anchorCtx)
+let isPlaying = false;
+let anchorSet = false;     // 锚点是否已绑定到实际起播时刻
+let anchorCtx = 0;
+let anchorHead = 0;
+let pendingLead = 0;       // 起播前缓冲
+let pausedHead = 0;        // 暂停/未播时的逻辑位置(秒)
+let isPaused = false;      // 是否由用户主动暂停(用于按钮显示"继续")
+let streamEnded = false;
+let lastEnd = 0;           // 上一段音频实际结束的时间轴位置(秒)，用于无缝且不重叠地排下一段
+
+// 句级事实源：computeSentences() 产出，[{ engine, voice, text }]。变速续播的定位基准
+let allSentences = [];
+// 运行段队列(段级流式)：buildRunsFrom() 产出，逐段串行发送(收到 {end} 才发下一段)
+let runQueue = [];
+let runIndex = 0;
+// 句级时间线：每句音频在 buffer 中的起始样本 + 句下标。用于变速时按句定位、续播
+// timeline[i] = { startSample, sentenceIndex }
+let timeline = [];
+// 当前 run 内已收到的 seg 序号。Kokoro 每句一个 seg,Edge 整个 run 一个 seg,
+// 故句下标 = run.startSentence + segWithinRun,而非全局 seg 计数
+let segWithinRun = 0;
+
+function initAudio() {
+    ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+    masterGain = ctx.createGain();
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    masterGain.connect(analyser);
+    analyser.connect(ctx.destination);
+}
+
+// 当前逻辑播放头(秒)
+function getHead() {
+    if (!isPlaying || !anchorSet) return pausedHead;
+    // 已调度内容末尾(scheduledPos/SR)对应 ctx 时间 lastEnd；当前头 = 末尾 - 剩余未播时长。
+    // 这样把欠载留白也计入，避免线性推算高估播放头导致 seek 不准。
+    const scheduledSec = scheduledPos / SAMPLE_RATE;
+    const remaining = Math.max(0, lastEnd - ctx.currentTime);
+    const h = scheduledSec - remaining;
+    return Math.min(Math.max(h, anchorHead), writePos / SAMPLE_RATE);
+}
+
+// 追加新合成的样本到累积缓冲
+function appendSamples(f32) {
+    if (writePos + f32.length > buffer.length) {
+        let cap = buffer.length * 2;
+        while (cap < writePos + f32.length) cap *= 2;
+        const nb = new Float32Array(cap);
+        nb.set(buffer.subarray(0, writePos));
+        buffer = nb;
+    }
+    buffer.set(f32, writePos);
+    writePos += f32.length;
+}
+
+function stopAllSources() {
+    sources.forEach(s => { s.onended = null; try { s.stop(); } catch (_) {} try { s.disconnect(); } catch (_) {} });
+    sources = [];
+}
+
+// 把 [scheduledPos, writePos) 之间尚未调度的样本排入时间轴
+function pump() {
+    if (!isPlaying || !ctx || scheduledPos >= writePos) return;
+
+    // 懒绑定起播时刻(等首块数据到达)
+    if (!anchorSet) {
+        anchorCtx = ctx.currentTime + pendingLead;
+        anchorHead = scheduledPos / SAMPLE_RATE;
+        lastEnd = anchorCtx;       // 第一段从锚点起播
+        anchorSet = true;
+    }
+
+    const seg = buffer.slice(scheduledPos, writePos);
+
+    const ab = ctx.createBuffer(1, seg.length, SAMPLE_RATE);
+    ab.copyToChannel(seg, 0);
+    const src = ctx.createBufferSource();
+    src.buffer = ab;
+    src.connect(masterGain);
+
+    // 紧贴上一段末尾排队：取 max(now, lastEnd) 保证既不重叠(踩踏/电音)也无负延迟
+    const when = Math.max(ctx.currentTime, lastEnd);
+    src.start(when);
+    lastEnd = when + ab.duration;
+    scheduledPos = writePos;
+
+    sources.push(src);
+    src.onended = () => {
+        sources = sources.filter(s => s !== src);
+        maybeDone();
+    };
+
+    setStatus("playing");
+}
+
+function maybeDone() {
+    if (!streamEnded || !isPlaying) return;
+    if (scheduledPos < writePos || sources.length > 0) return;
+    isPlaying = false;
+    pausedHead = writePos / SAMPLE_RATE;
+    setStatus("done");
+    updatePlayBtn();
+}
+
+// 从指定位置开始播放(用于继续 / 跳转)
+function startPlayback(fromSec, lead) {
+    stopAllSources();
+    isPlaying = true;
+    isPaused = false;
+    anchorSet = false;
+    pendingLead = lead;
+    pausedHead = fromSec;
+    scheduledPos = Math.round(fromSec * SAMPLE_RATE);
+    updatePlayBtn();
+    if (ctx.state === "suspended") { ctx.resume().catch(() => {}); }
+    pump();
+}
+
+// 发送当前 run：runQueue[runIndex]。收到该 run 的 {end} 后由 onmessage 触发下一 run。
+function sendCurrentRun(markRunPending) {
+    const run = runQueue[runIndex];
+    if (!run) return;
+    markRunPending();
+    ws.send(JSON.stringify({
+        text: run.text,
+        engine: run.engine,
+        voice: run.voice,
+        speed: currentSpeed,
+    }));
+}
+
+// 发起合成：开新 WS，连接后逐段串行发送 runQueue
+function sendRequest() {
+    const proto = window.location.protocol === "https:" ? "wss://" : "ws://";
+    const socket = new WebSocket(`${proto}${window.location.host}/ws/tts`);
+    socket.binaryType = "arraybuffer";
+    ws = socket;
+    let awaitingRunTerminal = false;
+    let terminalState = null;
+    const sendRun = () => sendCurrentRun(() => { awaitingRunTerminal = true; });
+
+    socket.onopen = () => {
+        if (socket !== ws) return;
+        setStatus("streaming");
+        sendRun();
+    };
+
+    socket.onmessage = (e) => {
+        if (socket !== ws) return;
+        if (typeof e.data !== "string") {
+            const dv = new DataView(e.data);
+            const len = e.data.byteLength >> 1;
+            const f32 = new Float32Array(len);
+            for (let i = 0; i < len; i++) f32[i] = dv.getInt16(i * 2, true) / 32768;
+            appendSamples(f32);
+            pump();
+            return;
+        }
+        let meta;
+        try { meta = JSON.parse(e.data); } catch (_) { return; }
+        if (meta.type === "error") {
+            awaitingRunTerminal = false;
+            terminalState = "error";
+            // 后端拒绝/合成失败：显式进入错误态，绝不显示"完成"掩盖失败(不伪装成功)。
+            // 停止一切调度并结束流，但保留已合成音频(用户仍可回放先前成功部分)。
+            streamEnded = true;
+            stopAllSources();
+            isPlaying = false;
+            isPaused = false;
+            setStatus("error");
+            updatePlayBtn();
+            return;
+        }
+        if (meta.type === "seg") {
+            // 句边界标记：记录该句音频在 buffer 中的起点。句下标 = run.startSentence + 段内序号
+            const run = runQueue[runIndex] || { startSentence: 0 };
+            const sentenceIndex = run.startSentence + segWithinRun;
+            segWithinRun++;
+            timeline.push({ startSample: writePos, sentenceIndex });
+            return;
+        }
+        if (meta.type === "end") {
+            awaitingRunTerminal = false;
+            terminalState = "end";
+            // 当前 run 结束：还有下一段则继续发(不置 streamEnded，保持无缝)，否则收尾
+            runIndex++;
+            segWithinRun = 0;
+            if (runIndex < runQueue.length) {
+                terminalState = null;
+                sendRun();
+            } else {
+                streamEnded = true;
+                maybeDone();
+            }
+        }
+    };
+
+    socket.onerror = () => {
+        if (socket !== ws) return;
+        stopAllSources();
+        isPlaying = false;
+        isPaused = false;
+        streamEnded = true;
+        setStatus("error");
+        updatePlayBtn();
+    };
+    socket.onclose  = () => {
+        if (socket !== ws) return;
+        if (terminalState === "error") return;
+        if (awaitingRunTerminal) {
+            stopAllSources();
+            isPlaying = false;
+            isPaused = false;
+            streamEnded = true;
+            setStatus("error");
+            updatePlayBtn();
+            return;
+        }
+        streamEnded = true;
+        if (isPlaying) {
+            maybeDone();
+        } else {
+            setStatus("idle");
+        }
+    };
+}
+
+async function start() {
+    // 守卫：音色目录未就绪(未加载完/加载失败)时不得合成。否则 select.value 为空,
+    // engineOfVoice("") 会误回落 edge,向后端发空 voice → 400/合成失败。此处显式拦截并提示。
+    if (!voicesReady) {
+        setStatus("connecting");
+        try {
+            if (voicesLoadError) voicesPromise = null;
+            voicesPromise = voicesPromise || loadVoices();
+            await voicesPromise;
+        } catch (err) {
+            console.error(err);
+            voicesLoadError = true;
+            setStatus("error");
+            return;
+        }
+    }
+    if (!selectedVoicesReady()) {
+        setStatus("error");
+        return;
+    }
+    // 构建句级事实源 + 运行段队列：非 Auto = 同引擎合并；Auto = 按句语言分段。空文本直接忽略
+    allSentences = computeSentences();
+    runQueue = buildRunsFrom(0);
+    if (!runQueue.length) { stop(); return; }
+
+    if (!ctx) initAudio();
+    if (ctx.state === "suspended") { ctx.resume().catch(() => {}); }
+    if (ws) { try { ws.onclose = null; ws.close(); } catch (_) {} ws = null; }
+    stopAllSources();
+    runIndex = 0;
+    segWithinRun = 0;
+    timeline = [];
+    buffer = new Float32Array(SAMPLE_RATE * 30);
+    writePos = 0;
+    scheduledPos = 0;
+    pausedHead = 0;
+    isPlaying = true;
+    isPaused = false;
+    anchorSet = false;
+    pendingLead = LEAD_TIME;
+    streamEnded = false;
+    setStatus("connecting");
+    updatePlayBtn();
+    sendRequest();
+}
+
+// 停止：清空一切
+function stop() {
+    stopAllSources();
+    if (ws) { try { ws.close(); } catch (_) {} ws = null; }
+    runQueue = [];
+    runIndex = 0;
+    segWithinRun = 0;
+    timeline = [];
+    writePos = 0;
+    scheduledPos = 0;
+    pausedHead = 0;
+    isPlaying = false;
+    isPaused = false;
+    anchorSet = false;
+    streamEnded = false;
+    setStatus("idle");
+    updatePlayBtn();
+}
+
+// 暂停 / 继续
+function togglePlay() {
+    if (!ctx || writePos === 0) return;
+    if (isPlaying) {
+        pausedHead = getHead();
+        isPlaying = false;
+        isPaused = true;
+        stopAllSources();
+        setStatus("paused");
+        updatePlayBtn();
+    } else {
+        startPlayback(pausedHead, 0.08);
+    }
+}
+
+// 前进 / 后退 (delta 秒)
+function seek(delta) {
+    if (!ctx || writePos === 0) return;
+    const dur = writePos / SAMPLE_RATE;
+    const target = Math.max(0, Math.min(dur, getHead() + delta));
+    if (isPlaying) {
+        startPlayback(target, 0.05);
+    } else {
+        pausedHead = target;
+        scheduledPos = Math.round(target * SAMPLE_RATE);
+    }
+}
+
+// ============================================================
+// 可视化波形
+// ============================================================
+function drawViz() {
+    const canvas = document.getElementById("viz");
+    const hint = document.getElementById("vizHint");
+    const dpr = window.devicePixelRatio || 1;
+    const c = canvas.getContext("2d");
+
+    function resize() {
+        canvas.width = canvas.clientWidth * dpr;
+        canvas.height = canvas.clientHeight * dpr;
+    }
+    resize();
+    window.addEventListener("resize", resize);
+
+    // 固定柱数(128)，不依赖 analyser：页面加载(analyser 未建)时也能跑待机波浪动画
+    const BARS = 128;
+    const data = new Uint8Array(BARS);
+
+    // 渐变随 canvas 尺寸变化才需重建，缓存复用，避免每帧每柱重复创建(#19)
+    let activeGrad = null;
+    function buildGradient() {
+        const g = c.createLinearGradient(0, 0, 0, canvas.height);
+        g.addColorStop(0, "rgba(56,189,248,0.95)");
+        g.addColorStop(1, "rgba(129,140,248,0.6)");
+        activeGrad = g;
+    }
+    buildGradient();
+    window.addEventListener("resize", buildGradient);
+
+    function frame(now) {
+        requestAnimationFrame(frame);
+        // 仅在播放且 analyser 就绪时读频率数据；否则走待机正弦波浪(页面加载即动)
+        const active = isPlaying && analyser;
+        if (active) analyser.getByteFrequencyData(data);
+
+        const w = canvas.width, h = canvas.height;
+        c.clearRect(0, 0, w, h);
+
+        const bars = BARS;
+        const gap = 2 * dpr;
+        const bw = (w - gap * bars) / bars;
+        const dark = document.documentElement.classList.contains("dark");
+        const idleColor = dark ? "rgba(148,163,184,0.28)" : "rgba(100,116,139,0.28)";
+
+        // 待机时显示占位提示文字；播放时隐藏
+        hint.style.opacity = active ? "0" : "1";
+
+        // 整帧统一 fillStyle，所有柱子共用同一个缓存渐变(覆盖全高)
+        c.fillStyle = active ? activeGrad : idleColor;
+
+        const t = (now || 0) / 1000;
+        const r = Math.min(bw / 2, 2 * dpr);
+
+        for (let i = 0; i < bars; i++) {
+            let bh;
+            if (active) {
+                bh = Math.max(2 * dpr, (data[i] / 255) * h * 0.95);
+            } else {
+                // 待机：柔和起伏的正弦波形作为占位，提示这是音频可视化区
+                const wave = Math.sin(i * 0.35 + t * 1.6) * 0.5 + 0.5;
+                bh = (0.12 + wave * 0.18) * h;
+            }
+            const x = i * (bw + gap);
+            const y = (h - bh) / 2;
+            c.beginPath();
+            c.roundRect(x, y, bw, bh, r);
+            c.fill();
+        }
+    }
+    requestAnimationFrame(frame);
+}
+
+applyLang();   // 初始化界面语言(内部刷新 voices/charCount/playBtn/status)
+drawViz();     // 页面加载即启动波形动画(待机走正弦波浪,播放时读 analyser)
+// 拉取后端音色目录填充下拉；失败则下拉为空并在状态栏提示，不伪装成功
+voicesPromise = loadVoices().catch(err => {
+    console.error(err);
+    voicesLoadError = true;   // 标记加载失败：点朗读时显式报错并重试，不静默发空 voice
+    setStatus("error");
+    throw err;
+});
+</script>
+</body>
+</html>

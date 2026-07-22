@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+.agent-runway/
+.claude/
+*.db
+
+models/
+.venv/
+venv/
+
+*.log
+
+# Local review / agent scratch (never publish)
+bug.md
+CLAUDE.md
+*.csv

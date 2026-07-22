@@ -1,0 +1,52 @@
+services:
+  tts-api:
+    build: .
+    container_name: tts-api
+    ports:
+      # 本机/局域网直连：http://localhost:8880/index.html
+      - "8880:8880"
+    environment:
+      # 单次合成最大文本长度(字符)；留空或删除本行即用后端默认值 100000。
+      - MAX_TEXT_LENGTH=100000
+      # 浏览器跨域来源白名单；本地/内网开放使用 *，公网部署建议改成实际域名，多个来源用英文逗号分隔。
+      - TTS_CORS_ALLOW_ORIGINS=*
+      # Edge 在线音色列表缓存时间(秒)；刷新失败时会继续使用上一次成功缓存。
+      - EDGE_VOICES_CACHE_TTL_SECONDS=86400
+      # 单请求合成 wall-clock 超时(秒)；0 表示关闭。公网/多用户部署建议设置为非 0。
+      - TTS_SYNTHESIS_TIMEOUT_SECONDS=0
+      # ffmpeg 子进程并发上限；超限显式拒绝请求，避免 CPU/内存被打满。
+      - TTS_MAX_FFMPEG_PROCESSES=2
+      # Kokoro 推理并发上限(REST/WS 共用)；超限的请求排队等待，避免线程池被占满。
+      # WS 的 Kokoro 不产生 ffmpeg，此闸门是其唯一并发保护，公网/多用户建议按 CPU 核数调小。
+      - TTS_MAX_SYNTHESIS_CONCURRENCY=2
+      # 对外 API 鉴权密钥：留空 = 完全开放(仅本地/内网直连时用)；
+      # 设为非空即对外部程序化客户端(如浏览器扩展)启用鉴权。同源自有页面(/index.html、/api)始终免密。
+      # 【部署前请务必改成你自己的随机长密钥】，例如 openssl rand -hex 32 生成。
+      - TTS_API_KEY=change-me-to-a-long-random-secret
+    volumes:
+      - ./models:/app/models
+    # 默认使用 compose 自建网络，无需预先创建任何 external 网络即可 up。
+    # 若前面挂了 Caddy 等反代，取消下面两行注释，并确保已创建该网络：
+    #   docker network create caddy_net
+    # networks:
+    #   - caddy_net
+    restart: unless-stopped
+    # 后端内存上限：PyTorch CPU 运行时 + 两个 Kokoro pipeline，峰值约 2~2.5GB，4G 留足余量。
+    # 注意：浏览器端长文本累积 PCM 的内存增长不受此限制约束(那是客户端的事)。
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8880/')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+# 仅在启用上方 caddy_net 注释块时取消本节注释：
+# networks:
+#   caddy_net:
+#     external: true

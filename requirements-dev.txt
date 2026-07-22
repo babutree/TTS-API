@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Required by starlette.testclient used in the unittest suite.
+httpx==0.28.1
