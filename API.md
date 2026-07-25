@@ -139,12 +139,18 @@ List all available voices for both engines.
   ],
   "edge": [
     { "id": "zh-CN-XiaoxiaoNeural", "name": "Microsoft Xiaoxiao Online (Natural) - Chinese (Mainland)", "gender": "Female", "locale": "zh-CN" },
+    { "id": "zh-CN-liaoning-XiaobeiNeural", "name": "Microsoft Xiaobei Online (Natural) - Chinese (Northeastern Mandarin)", "gender": "Female", "locale": "zh-CN-liaoning" },
+    { "id": "zh-CN-shaanxi-XiaoniNeural", "name": "Microsoft Xiaoni Online (Natural) - Chinese (Zhongyuan Mandarin Shaanxi)", "gender": "Female", "locale": "zh-CN-shaanxi" },
+    { "id": "zh-HK-HiuGaaiNeural", "name": "Microsoft HiuGaai Online (Natural) - Chinese (Cantonese Traditional)", "gender": "Female", "locale": "zh-HK" },
+    { "id": "zh-TW-HsiaoChenNeural", "name": "Microsoft HsiaoChen Online (Natural) - Chinese (Taiwanese Mandarin)", "gender": "Female", "locale": "zh-TW" },
     { "id": "en-US-AvaNeural",      "name": "Microsoft Ava Online (Natural) - English (United States)", "gender": "Female", "locale": "en-US" }
   ]
 }
 ```
 
 Edge voices are fetched live from Microsoft and cached for `EDGE_VOICES_CACHE_TTL_SECONDS` seconds. If a refresh fails after a successful fetch, the endpoint returns the stale cache instead of replacing it with an empty list.
+
+This endpoint returns the **full** Microsoft Edge catalog (no server-side locale filter). The bundled Web UI (`index.html`) further filters Edge voices to these locales only: `zh-CN`, `zh-CN-liaoning`, `zh-CN-shaanxi`, `zh-HK`, `zh-TW`, `en-US`, `en-GB`. Chinese dialect/regional locales are shown in the Chinese dropdown with a dialect tag (Cantonese / Taiwan / Northeastern / Shaanxi); Mandarin `zh-CN` has no tag. ShortNames and locales are owned by Microsoft — if a voice is renamed or removed upstream, it disappears from `/api/voices` and the UI without a local fallback catalog.
 
 ---
 

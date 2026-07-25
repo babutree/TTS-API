@@ -833,7 +833,11 @@ async def api_tts(req: TTSRequest, request: Request, download: bool = False):
 
 
 def _preview_text(engine: str, voice: str) -> str:
+    # 中文音色用中文样句：Kokoro 中文前缀 + Edge 中文 locale(zh-*)。
+    # 此前 Edge zh-CN/zh-HK 等误走英文样句，Auto 试听中文边听起来像英文。
     if engine == "kokoro" and voice.startswith(("zf_", "zm_")):
+        return "你好，这是音色试听。"
+    if engine == "edge" and str(voice).lower().startswith("zh-"):
         return "你好，这是音色试听。"
     return "Hello, this is a short voice preview."
 

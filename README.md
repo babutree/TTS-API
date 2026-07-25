@@ -13,20 +13,33 @@
   <a href="README_CN.md">中文</a>
 </p>
 
-A streaming TTS service built on FastAPI. Uses Kokoro for CPU-only on-device synthesis and Microsoft Edge TTS for cloud synthesis. Comes with a web UI.
+**Ready-to-run streaming TTS** — one `docker compose up` gives you a polished browser UI **and** a programmable dual-engine API. Local Kokoro (CPU, offline) for free synthesis; Microsoft Edge TTS for natural cloud voices. Built for humans in the UI and for scripts, extensions, and backends over REST / WebSocket.
+
+## Why this project
+
+| You want… | You get… |
+|-----------|----------|
+| Try it in a browser | Open `/index.html` — paste text (Markdown OK), pick engine/voice, stream PCM with seek/pause |
+| Call it from code | `POST /api/tts` → streaming MP3; `/ws/tts` → 24 kHz mono PCM; interactive tester at `/api` |
+| Ship without GPU drama | CPU-only PyTorch wheels, Docker image with `ffmpeg` + `espeak-ng`, model cache on a volume |
+| Mix Chinese & English | UI **Auto** routes per sentence to the matching voice (server never receives `engine: auto`) |
+| Integrate safely | Optional `TTS_API_KEY`, same-origin UI exemption, concurrency / timeout knobs for multi-user hosts |
 
 ## Features
 
 | Capability | Detail |
 |------------|--------|
-| Dual engines | Kokoro on-device (free, offline) + Edge Microsoft cloud (natural, multi-lingual) |
-| Real-time streaming | WebSocket binary frames, gapless playback via Web Audio API |
+| Dual engines | Kokoro on-device (free, offline) + Edge Microsoft cloud (natural, multi-locale) |
+| Real-time streaming | WebSocket binary PCM + look-ahead Web Audio scheduler (stable long Edge streams) |
+| Programmable API | REST MP3 stream, WebSocket PCM, voice list/preview, key probe, interactive `/api` tester |
+| Markdown-safe input | Server strips headings, lists, bold/code/links before speaking (no markup read aloud) |
+| Language auto-routing | UI Auto mode: Chinese → Chinese voice, English → English voice, seamless handoff |
+| Chinese Edge locales | UI whitelist: Mandarin + Liaoning/Shaanxi dialects, Cantonese (`zh-HK`), Taiwan (`zh-TW`) |
 | Speed control | 0.5x–2.0x (UI) / 0.5x–3.0x (API), sentence-level switching during playback |
-| Seek & pause | ±10s seek, pause/resume, stop — all with buffer retention |
-| Language auto-routing | Auto engine mode per-sentence language detection: Chinese → Chinese voice, English → English voice |
-| REST API | `POST /api/tts` returns streaming MP3 |
-| Dark mode | Persistent theme toggle with glassmorphism design |
-| i18n UI | Chinese/English interface with hot-switch |
+| Seek & pause | ±10s seek, pause/resume, stop — buffer retained |
+| Auth for integrations | `TTS_API_KEY` for CRX/scripts; REST prefers `X-API-Key` (Caddy Basic Auth friendly) |
+| Deploy controls | Synthesis timeout, ffmpeg / Kokoro concurrency caps, CORS allowlist, health readiness |
+| Dark mode + i18n | Persistent theme; Chinese/English UI hot-switch |
 
 ## Architecture
 

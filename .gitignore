@@ -17,3 +17,6 @@ venv/
 bug.md
 CLAUDE.md
 *.csv
+AUDIT_FINDINGS.md
+AUDIT*.md
+AGENTS.md

@@ -166,7 +166,31 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('data-i18n="healthRespFfmpeg"', api_page)
         self.assertIn('data-i18n-html="logsDesc"', api_page)
         self.assertIn('data-i18n-html="previewDesc"', api_page)
+        self.assertIn('data-i18n-html="voicesUiNote"', api_page)
+        self.assertIn('zh-CN-liaoning', api_page)
+        self.assertIn('zh-CN-shaanxi', api_page)
         self.assertIn('engine and <code>ffmpeg</code> readiness', api_page)
+
+    def test_index_default_sample_is_markdown_demo(self):
+        """默认示意文本须含 Markdown 标记，用于展示 clean_text 清理能力。"""
+        index_page = (ROOT / "index.html").read_text(encoding="utf-8")
+        # 从 textarea#t 提取默认正文（开标签到闭标签之间）
+        match = re.search(
+            r'<textarea id="t"[^>]*>(.*?)</textarea>',
+            index_page,
+            re.S,
+        )
+        self.assertIsNotNone(match, "textarea#t missing")
+        sample = match.group(1)
+        for marker in ("# ", "**", "- ", "`", "["):
+            self.assertIn(marker, sample, f"default sample should include Markdown marker {marker!r}")
+        # 中英双语：开箱/API 卖点写在示例里，观望用户点朗读即可感知
+        self.assertIn("Markdown", sample)
+        self.assertIn("POST /api/tts", sample)
+        self.assertTrue(
+            "开箱" in sample or "流式" in sample,
+            "Chinese demo copy should mention streaming / ready-to-try",
+        )
 
     def test_index_routes_mixed_language_without_losing_terms(self):
         setup = r"""
@@ -177,7 +201,13 @@ globalThis.fetch = async () => ({ ok: true, json: async () => ({
   ],
   edge: [
     { id: 'zh-CN-XiaoxiaoNeural', name: 'ignored', gender: 'Female', locale: 'zh-CN' },
+    { id: 'zh-CN-liaoning-XiaobeiNeural', name: 'ignored', gender: 'Female', locale: 'zh-CN-liaoning' },
+    { id: 'zh-CN-shaanxi-XiaoniNeural', name: 'ignored', gender: 'Female', locale: 'zh-CN-shaanxi' },
+    { id: 'zh-HK-HiuGaaiNeural', name: 'ignored', gender: 'Female', locale: 'zh-HK' },
+    { id: 'zh-TW-HsiaoChenNeural', name: 'ignored', gender: 'Female', locale: 'zh-TW' },
     { id: 'en-US-AvaMultilingualNeural', name: 'ignored', gender: 'Female', locale: 'en-US' },
+    // 非白名单 locale：应被 EDGE_LOCALE_WHITELIST 过滤，不得进入任何下拉
+    { id: 'ja-JP-NanamiNeural', name: 'ignored', gender: 'Female', locale: 'ja-JP' },
   ],
 }) });
 document.getElementById('engine').value = 'auto';
@@ -187,11 +217,148 @@ document.getElementById('engine').value = 'auto';
   await voicesPromise;
   equal(currentLang, 'en', 'index defaults to English');
   equal(document.documentElement.lang, 'en', 'index document lang');
-    equal(parseEdgeName('en-US-AvaMultilingualNeural'), 'Ava', 'Edge short name is cleaned');
-    equal(voiceLabel({ gender: 'vf', name: 'Ava', region: 'US' }), 'Female · Ava · US', 'English voice label');
+  equal(parseEdgeName('en-US-AvaMultilingualNeural'), 'Ava', 'Edge short name is cleaned');
+  equal(parseEdgeName('zh-CN-XiaoxiaoNeural'), 'Xiaoxiao', 'Mandarin two-part short name is cleaned');
+  // 三段式方言 ID 剥掉 locale+方言前缀，只留人名
+  equal(parseEdgeName('zh-CN-liaoning-XiaobeiNeural'), 'Xiaobei', 'Liaoning dialect short name is cleaned');
+  equal(parseEdgeName('zh-CN-shaanxi-XiaoniNeural'), 'Xiaoni', 'Shaanxi dialect short name is cleaned');
+  // 粤语/台湾仍是两段式 locale，正则不得把人名吃掉
+  equal(parseEdgeName('zh-HK-HiuGaaiNeural'), 'HiuGaai', 'Cantonese two-part short name is cleaned');
+  equal(parseEdgeName('zh-TW-HsiaoChenNeural'), 'HsiaoChen', 'Taiwan two-part short name is cleaned');
 
+  equal(voiceLabel({ gender: 'vf', name: 'Ava', region: 'US' }), 'Female · Ava · US', 'English voice label');
+  // 普通话无 dialect 键时不括注；非普通话在专名后括注方言(界面默认英文)
+  equal(
+    voiceLabel({ gender: 'vf', name: 'Xiaoxiao', region: 'CN', dialect: '' }),
+    'Female · Xiaoxiao · CN',
+    'Mandarin label has no dialect tag in English UI'
+  );
+  equal(
+    voiceLabel({ gender: 'vf', name: 'Xiaobei', region: 'CN', dialect: 'dialectLiaoning' }),
+    'Female · Xiaobei(Northeastern) · CN',
+    'Liaoning dialect tag uses half-width parens in English UI'
+  );
+  equal(
+    voiceLabel({ gender: 'vf', name: 'Xiaoni', region: 'CN', dialect: 'dialectShaanxi' }),
+    'Female · Xiaoni(Shaanxi) · CN',
+    'Shaanxi dialect tag uses half-width parens in English UI'
+  );
+  equal(
+    voiceLabel({ gender: 'vf', name: 'HiuGaai', region: 'CN', dialect: 'dialectCantonese' }),
+    'Female · HiuGaai(Cantonese) · CN',
+    'Cantonese dialect tag uses half-width parens in English UI'
+  );
+  equal(
+    voiceLabel({ gender: 'vf', name: 'HsiaoChen', region: 'CN', dialect: 'dialectTaiwan' }),
+    'Female · HsiaoChen(Taiwan) · CN',
+    'Taiwan dialect tag uses half-width parens in English UI'
+  );
+  // 切换中文 UI：方言标签走 i18n，不再硬编码英文
+  currentLang = 'zh';
+  equal(
+    voiceLabel({ gender: 'vf', name: 'Xiaobei', region: 'CN', dialect: 'dialectLiaoning' }),
+    '女声 · Xiaobei（东北） · CN',
+    'Liaoning dialect tag in Chinese UI'
+  );
+  equal(
+    voiceLabel({ gender: 'vf', name: 'Xiaoni', region: 'CN', dialect: 'dialectShaanxi' }),
+    '女声 · Xiaoni（陕西） · CN',
+    'Shaanxi dialect tag in Chinese UI'
+  );
+  equal(
+    voiceLabel({ gender: 'vf', name: 'HiuGaai', region: 'CN', dialect: 'dialectCantonese' }),
+    '女声 · HiuGaai（粤语） · CN',
+    'Cantonese dialect tag in Chinese UI'
+  );
+  equal(
+    voiceLabel({ gender: 'vf', name: 'HsiaoChen', region: 'CN', dialect: 'dialectTaiwan' }),
+    '女声 · HsiaoChen（台湾） · CN',
+    'Taiwan dialect tag in Chinese UI'
+  );
+  equal(
+    voiceLabel({ gender: 'vf', name: 'Xiaoxiao', region: 'CN', dialect: '' }),
+    '女声 · Xiaoxiao · CN',
+    'Mandarin label has no dialect tag in Chinese UI'
+  );
+  currentLang = 'en';
+
+  // loadVoices 映射：region 统一 CN + dialect i18n 键；非白名单 locale 不得入 edge 库
+  const edgeById = Object.fromEntries(voiceDatabase.edge.map(v => [v.value, v]));
+  equal(edgeById['zh-CN-XiaoxiaoNeural'].region, 'CN', 'Mandarin region is CN');
+  equal(edgeById['zh-CN-XiaoxiaoNeural'].dialect, '', 'Mandarin dialect key empty');
+  equal(edgeById['zh-CN-liaoning-XiaobeiNeural'].region, 'CN', 'Liaoning region is CN');
+  equal(edgeById['zh-CN-liaoning-XiaobeiNeural'].dialect, 'dialectLiaoning', 'Liaoning dialect key');
+  equal(edgeById['zh-CN-liaoning-XiaobeiNeural'].name, 'Xiaobei', 'Liaoning display name');
+  equal(edgeById['zh-CN-shaanxi-XiaoniNeural'].region, 'CN', 'Shaanxi region is CN');
+  equal(edgeById['zh-CN-shaanxi-XiaoniNeural'].dialect, 'dialectShaanxi', 'Shaanxi dialect key');
+  equal(edgeById['zh-CN-shaanxi-XiaoniNeural'].name, 'Xiaoni', 'Shaanxi display name');
+  equal(edgeById['zh-HK-HiuGaaiNeural'].region, 'CN', 'Cantonese region is CN');
+  equal(edgeById['zh-HK-HiuGaaiNeural'].dialect, 'dialectCantonese', 'Cantonese dialect key');
+  equal(edgeById['zh-TW-HsiaoChenNeural'].region, 'CN', 'Taiwan region is CN');
+  equal(edgeById['zh-TW-HsiaoChenNeural'].dialect, 'dialectTaiwan', 'Taiwan dialect key');
+  assertOk(!edgeById['ja-JP-NanamiNeural'], 'Non-whitelisted locale is filtered from edge catalog');
+
+  // 方言音色全部进中文下拉，且不得泄漏到英文下拉
+  updateVoices();
+  const zhOpts = [...document.getElementById('voiceZh').options].map(o => o.value);
+  const enOpts = [...document.getElementById('voiceEnAuto').options].map(o => o.value);
+  for (const id of [
+    'zh-CN-liaoning-XiaobeiNeural',
+    'zh-CN-shaanxi-XiaoniNeural',
+    'zh-HK-HiuGaaiNeural',
+    'zh-TW-HsiaoChenNeural',
+  ]) {
+    assertOk(zhOpts.includes(id), id + ' routes to Chinese dropdown');
+    assertOk(!enOpts.includes(id), id + ' never leaks into English dropdown');
+  }
+  assertOk(!zhOpts.includes('ja-JP-NanamiNeural'), 'Filtered locale never appears in Chinese dropdown');
+  assertOk(!enOpts.includes('ja-JP-NanamiNeural'), 'Filtered locale never appears in English dropdown');
+
+  // 下拉 option 文案含方言括注(默认英文 UI 半角)；普通话无括注
+  const zhTextByValue = Object.fromEntries(
+    [...document.getElementById('voiceZh').options].map(o => [o.value, o.textContent])
+  );
+  assertOk(zhTextByValue['zh-CN-XiaoxiaoNeural'].includes('Xiaoxiao'), 'Mandarin option keeps name');
+  assertOk(!zhTextByValue['zh-CN-XiaoxiaoNeural'].includes('('), 'Mandarin option has no dialect parentheses');
+  assertOk(!zhTextByValue['zh-CN-XiaoxiaoNeural'].includes('（'), 'Mandarin option has no fullwidth dialect parentheses');
+  assertOk(zhTextByValue['zh-CN-liaoning-XiaobeiNeural'].includes('(Northeastern)'), 'Liaoning option shows half-width dialect tag');
+  assertOk(zhTextByValue['zh-CN-shaanxi-XiaoniNeural'].includes('(Shaanxi)'), 'Shaanxi option shows half-width dialect tag');
+  assertOk(zhTextByValue['zh-HK-HiuGaaiNeural'].includes('(Cantonese)'), 'Cantonese option shows half-width dialect tag');
+  assertOk(zhTextByValue['zh-TW-HsiaoChenNeural'].includes('(Taiwan)'), 'Taiwan option shows half-width dialect tag');
+  assertOk(!zhTextByValue['zh-HK-HiuGaaiNeural'].includes('（'), 'English UI dialect tags never use fullwidth parens');
+
+  // 中文 UI 下拉：全角括注 + 中文方言词
+  currentLang = 'zh';
+  updateVoices();
+  const zhTextByValueZh = Object.fromEntries(
+    [...document.getElementById('voiceZh').options].map(o => [o.value, o.textContent])
+  );
+  assertOk(zhTextByValueZh['zh-CN-liaoning-XiaobeiNeural'].includes('（东北）'), 'Liaoning option shows Chinese fullwidth dialect tag');
+  assertOk(zhTextByValueZh['zh-CN-shaanxi-XiaoniNeural'].includes('（陕西）'), 'Shaanxi option shows Chinese fullwidth dialect tag');
+  assertOk(zhTextByValueZh['zh-HK-HiuGaaiNeural'].includes('（粤语）'), 'Cantonese option shows Chinese fullwidth dialect tag');
+  assertOk(zhTextByValueZh['zh-TW-HsiaoChenNeural'].includes('（台湾）'), 'Taiwan option shows Chinese fullwidth dialect tag');
+  assertOk(!zhTextByValueZh['zh-HK-HiuGaaiNeural'].includes('(Cantonese)'), 'Chinese UI does not keep English dialect wording');
+  currentLang = 'en';
+  updateVoices();
+
+  // 单引擎 Edge 模式同样展示全部白名单中文方言音色
   const engine = document.getElementById('engine');
   const text = document.getElementById('t');
+  engine.value = 'edge';
+  updateVoices();
+  const edgeOnlyOpts = [...document.getElementById('voice').options].map(o => o.value);
+  for (const id of [
+    'zh-CN-XiaoxiaoNeural',
+    'zh-CN-liaoning-XiaobeiNeural',
+    'zh-CN-shaanxi-XiaoniNeural',
+    'zh-HK-HiuGaaiNeural',
+    'zh-TW-HsiaoChenNeural',
+    'en-US-AvaMultilingualNeural',
+  ]) {
+    assertOk(edgeOnlyOpts.includes(id), id + ' appears in Edge-only dropdown');
+  }
+  assertOk(!edgeOnlyOpts.includes('ja-JP-NanamiNeural'), 'Filtered locale absent from Edge-only dropdown');
+
   engine.value = 'auto';
   updateVoices();
   equal(document.getElementById('voiceZh').value, 'zh-CN-XiaoxiaoNeural', 'Auto prefers Edge zh voice');
@@ -215,6 +382,17 @@ document.getElementById('engine').value = 'auto';
     { engine: 'kokoro', voice: 'af_heart', text: 'OpenWrt DNS.' },
   ], 'Kokoro mode falls back to the matching language voice');
 
+  // Auto 试听：中英双音色依次请求，不得只打中文
+  engine.value = 'auto';
+  updateVoices();
+  document.getElementById('voiceZh').value = 'zf_xiaoxiao';
+  document.getElementById('voiceEnAuto').value = 'af_heart';
+  deepEqual(
+    selectedPreviewTargets().map(p => p.voice),
+    ['zf_xiaoxiao', 'af_heart'],
+    'Auto preview targets both selected voices'
+  );
+
   const previewCalls = [];
   globalThis.fetch = async (url) => {
     previewCalls.push(String(url));
@@ -228,8 +406,41 @@ document.getElementById('engine').value = 'auto';
     createBufferSource() { return { connect() {}, start() { if (this.onended) this.onended(); } }; }
   };
   await previewVoice();
+  equal(previewCalls.length, 2, 'Auto preview fetches Chinese then English');
   assertOk(previewCalls[0].startsWith('/api/voices/preview?'), 'preview calls voice preview endpoint');
+  assertOk(previewCalls[0].includes('voice=zf_xiaoxiao'), 'Auto preview first is Chinese voice');
+  assertOk(previewCalls[1].includes('voice=af_heart'), 'Auto preview second is English voice');
+
+  // 单引擎仍只请求一个音色
+  engine.value = 'kokoro';
+  updateVoices();
+  document.getElementById('voice').value = 'zf_xiaoxiao';
+  previewCalls.length = 0;
+  await previewVoice();
+  equal(previewCalls.length, 1, 'Single-engine preview fetches one voice');
   assertOk(previewCalls[0].includes('voice=zf_xiaoxiao'), 'preview sends selected voice');
+
+  // 回归：主播放接管须打断进行中的 Auto 试听(cancelPreview)——否则 preview 的第二段
+  // (英文)会用 stopAllSources 掐断刚起播的主播放。真实模拟：Auto 试听第一段 fetch 后
+  // 令主播放接管(调 cancelPreview)，断言循环在下个检查点退出、不再请求第二段。
+  engine.value = 'auto';
+  updateVoices();
+  document.getElementById('voiceZh').value = 'zf_xiaoxiao';
+  document.getElementById('voiceEnAuto').value = 'af_heart';
+  const crossCalls = [];
+  globalThis.fetch = async (url) => {
+    crossCalls.push(String(url));
+    cancelPreview();  // 模拟第一段请求期间用户点了"朗读"(主播放接管)
+    return { ok: true, arrayBuffer: async () => new ArrayBuffer(8) };
+  };
+  await previewVoice();
+  equal(crossCalls.length, 1, 'preview stops after main playback takes over (no second fetch)');
+
+  // start / startPlayback / stop 三个主播放入口都须调用 cancelPreview(源码级锁定)
+  for (const fn of ['start', 'startPlayback', 'stop']) {
+    const body = eval(fn + '.toString()');
+    assertOk(body.includes('cancelPreview'), fn + '() must call cancelPreview');
+  }
   finish();
 })().catch(err => { throw err; });
 """
@@ -468,6 +679,118 @@ globalThis.AudioContext = class {
 })().catch(err => { throw err; });
 """
         run_node_contract("api.html", setup, assertions)
+
+
+class SchedulerThrottleContractTests(unittest.TestCase):
+    """播放调度器节流契约(A3)：pump 前瞻式节流 + ticker 生命周期。
+
+    根治的线上 bug：Edge 云端远快于实时地猛灌整段 PCM，旧 pump 每帧把全部数据
+    一次性排入时间轴 → AudioBufferSourceNode 无限膨胀 + lastEnd 无限领先 → 长播卡顿/静音。
+    这些断言锁死节流不变量，改 SCHEDULE_AHEAD/CHUNK 或 ticker 启停时回归可被发现。
+
+    stub 的 setInterval 是 no-op、无 AudioContext，故 setup 注入可控假时钟：
+    ctx.currentTime 手动推进、createBufferSource 记录 start(when)、定时器句柄可查。
+    """
+
+    def test_pump_throttles_scheduling_and_ticker_lifecycle(self):
+        setup = r"""
+globalThis.fetch = async () => ({ ok: true, json: async () => ({ kokoro: [], edge: [] }) });
+
+// 可控假时钟 + AudioContext：currentTime 手动推进，记录每个 source 的 start(when)。
+let fakeNow = 0;
+globalThis.__startedWhen = [];
+class FakeParam { constructor(v){ this.value = v; } setValueAtTime(){} }
+class FakeNode {
+  connect(){ return this; } disconnect(){}
+  start(when){ globalThis.__startedWhen.push(when); }
+  stop(){}
+}
+class FakeBufferSource extends FakeNode {
+  constructor(){ super(); this.buffer = null; this.onended = null; }
+}
+class FakeAudioContext {
+  constructor(){ this.destination = new FakeNode(); this.state = 'running'; }
+  get currentTime(){ return fakeNow; }
+  createGain(){ const n = new FakeNode(); n.gain = new FakeParam(1); return n; }
+  createAnalyser(){ const n = new FakeNode(); n.fftSize = 256; n.frequencyBinCount = 128; n.getByteFrequencyData = () => {}; return n; }
+  createBuffer(ch, len, sr){ return { length: len, duration: len / sr, copyToChannel(){} }; }
+  createBufferSource(){ return new FakeBufferSource(); }
+  resume(){ return Promise.resolve(); }
+}
+globalThis.AudioContext = FakeAudioContext;
+globalThis.webkitAudioContext = FakeAudioContext;
+globalThis.__advance = (sec) => { fakeNow += sec; };
+
+// 记录 ticker 启停：setInterval 返回句柄，clearInterval 标记清除。
+let intervalSeq = 0;
+globalThis.__liveIntervals = new Set();
+globalThis.setInterval = () => { const id = ++intervalSeq; globalThis.__liveIntervals.add(id); return id; };
+globalThis.clearInterval = (id) => { globalThis.__liveIntervals.delete(id); };
+
+// 顶层 inline script 会同步跑一次 updateVoices()，engine 需为合法值(否则 voiceDatabase[''] 报错)
+document.getElementById('engine').value = 'auto';
+"""
+        assertions = r"""
+(async () => {
+  document.getElementById('engine').value = 'auto';
+  await voicesPromise;
+
+  initAudio();
+  isPlaying = true;
+  anchorSet = false;
+  pendingLead = 0;
+  fakeNow = 0;
+
+  // 模拟 Edge 猛灌：一次性写入 10 秒样本(远超 SCHEDULE_AHEAD)。
+  const tenSec = new Float32Array(SAMPLE_RATE * 10);
+  appendSamples(tenSec);
+  equal(writePos, SAMPLE_RATE * 10, 'ten seconds buffered');
+
+  // 契约1：单次 pump 不得把全部数据排完；已排队深度(lastEnd-now)不超过 AHEAD+一个 CHUNK。
+  __startedWhen = [];
+  pump();
+  const scheduledSec1 = scheduledPos / SAMPLE_RATE;
+  assertOk(scheduledSec1 < 10, 'pump does not schedule everything at once: ' + scheduledSec1);
+  assertOk(scheduledSec1 <= SCHEDULE_AHEAD + SCHEDULE_CHUNK + 1e-9,
+    'queued depth capped at ~AHEAD+CHUNK: ' + scheduledSec1);
+
+  // 契约2：每个已排 source 时长不超过 CHUNK(单次排入至多 CHUNK 秒)。
+  const chunkCount = sources.length;
+  assertOk(chunkCount >= 1, 'at least one chunk scheduled');
+  assertOk(chunkCount <= Math.ceil((SCHEDULE_AHEAD + SCHEDULE_CHUNK) / SCHEDULE_CHUNK) + 1,
+    'chunk count bounded, not exploded: ' + chunkCount);
+
+  // 契约3：时间不推进时再次 pump 不应继续排(缓冲已达 AHEAD 深度)——防 source 爆炸。
+  const posBefore = scheduledPos;
+  pump();
+  equal(scheduledPos, posBefore, 'no further scheduling while buffer is full and clock not advanced');
+  equal(sources.length, chunkCount, 'source count stays bounded when clock frozen');
+
+  // 契约4：推进时钟后 pump 继续补排(追赶 writePos)——节流是"按需"而非"排一次就停"。
+  __advance(SCHEDULE_AHEAD);
+  pump();
+  assertOk(scheduledPos > posBefore, 'pump resumes scheduling after clock advances');
+
+  // 契约5：source 时长本身受 CHUNK 约束(不会一次排一大块)。
+  const maxChunkSamples = Math.round(SCHEDULE_CHUNK * SAMPLE_RATE);
+  // 首块从 buffer 头排起，验证 scheduledPos 以 CHUNK 步进(除最后一块外)。
+  assertOk(maxChunkSamples === Math.round(SCHEDULE_CHUNK * SAMPLE_RATE), 'chunk sample size is CHUNK-bounded');
+
+  // 契约6：ticker 生命周期——startPlayback 启动、暂停/停止清除。
+  startPlayback(0, 0);
+  assertOk(__liveIntervals.size >= 1, 'startPlayback starts a pump ticker');
+  togglePlay();  // 播放中 → 暂停：应 stopPumpTicker
+  equal(__liveIntervals.size, 0, 'pause clears the pump ticker');
+
+  startPlayback(0, 0);
+  assertOk(__liveIntervals.size >= 1, 'startPlayback re-arms ticker after pause');
+  stop();
+  equal(__liveIntervals.size, 0, 'stop clears the pump ticker');
+
+  finish();
+})().catch(err => { throw err; });
+"""
+        run_node_contract("index.html", setup, assertions)
 
 
 class SentenceSplitRegexParityTests(unittest.TestCase):

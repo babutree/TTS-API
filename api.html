@@ -102,9 +102,14 @@ fetch("https://tts.example.com/api/tts", {
   ],
   "edge": [
     { "id": "zh-CN-XiaoxiaoNeural", "name": "...", "gender": "Female", "locale": "zh-CN" },
+    { "id": "zh-CN-liaoning-XiaobeiNeural", "name": "...", "gender": "Female", "locale": "zh-CN-liaoning" },
+    { "id": "zh-CN-shaanxi-XiaoniNeural", "name": "...", "gender": "Female", "locale": "zh-CN-shaanxi" },
+    { "id": "zh-HK-HiuGaaiNeural", "name": "...", "gender": "Female", "locale": "zh-HK" },
+    { "id": "zh-TW-HsiaoChenNeural", "name": "...", "gender": "Female", "locale": "zh-TW" },
     { "id": "en-US-AvaNeural",      "name": "...", "gender": "Female", "locale": "en-US" }
   ]
 }</code></pre>
+        <p data-i18n-html="voicesUiNote">The API returns Microsoft’s full Edge catalog. The Web UI filters Edge voices to <code>zh-CN</code>, <code>zh-CN-liaoning</code>, <code>zh-CN-shaanxi</code>, <code>zh-HK</code>, <code>zh-TW</code>, <code>en-US</code>, <code>en-GB</code>. Dialect locales appear in the Chinese dropdown with a dialect tag. ShortNames are owned by Microsoft; renamed or delisted voices disappear with no local fallback catalog.</p>
         <div class="tester">
             <div><button class="btn" onclick="testVoices()" data-i18n="btnSend">Send request</button></div>
             <div class="out" id="outVoices"></div>
@@ -295,6 +300,7 @@ const I18N = {
         probeHint: "Use the \"Verify key\" button in the Authentication section above to test this endpoint.",
         logsDesc: "Diagnostic log endpoint for the in-memory ring buffer. It is not same-origin exempt; when <code>TTS_API_KEY</code> is configured, send a valid key with <code>X-API-Key</code> or <code>Authorization: Bearer</code>.",
         voicesDesc: "List all available voices for both engines. Edge voices are fetched live from Microsoft and cached for the configured TTL.",
+        voicesUiNote: "The API returns Microsoft’s full Edge catalog. The Web UI filters Edge voices to <code>zh-CN</code>, <code>zh-CN-liaoning</code>, <code>zh-CN-shaanxi</code>, <code>zh-HK</code>, <code>zh-TW</code>, <code>en-US</code>, <code>en-GB</code>. Dialect locales appear in the Chinese dropdown with a dialect tag. ShortNames are owned by Microsoft; renamed or delisted voices disappear with no local fallback catalog.",
         previewDesc: "Synthesize a short built-in voice preview. Query parameters: <code>engine</code> (<code>kokoro</code> or <code>edge</code>), <code>voice</code>, and <code>speed</code> (<code>0.5</code>–<code>3.0</code>). The response is <code>audio/mpeg</code> with <code>Content-Disposition: inline</code>.",
         ttsDesc: "Stream MP3 audio for the given text.",
         ttsReqBody: "Request body",
@@ -397,6 +403,7 @@ const I18N = {
         probeHint: "用上方「鉴权密钥」区的「校验密钥」按钮即可测试此端点。",
         logsDesc: "内存环形缓冲区的诊断日志端点。此端点不走同源免密；配置 <code>TTS_API_KEY</code> 后，必须用 <code>X-API-Key</code> 或 <code>Authorization: Bearer</code> 携带有效密钥。",
         voicesDesc: "列出两种引擎的全部可用音色。Edge 音色实时从微软拉取，并按配置的 TTL 缓存。",
+        voicesUiNote: "本接口返回微软 Edge 全量目录。Web UI 仅展示 <code>zh-CN</code>、<code>zh-CN-liaoning</code>、<code>zh-CN-shaanxi</code>、<code>zh-HK</code>、<code>zh-TW</code>、<code>en-US</code>、<code>en-GB</code>。方言 locale 进入中文下拉并带方言标注。ShortName 归微软维护；上游改名或下架后本地无回退目录，对应音色会直接消失。",
         previewDesc: "合成一段内置短音色试听。查询参数：<code>engine</code>（<code>kokoro</code> 或 <code>edge</code>）、<code>voice</code>、<code>speed</code>（<code>0.5</code>–<code>3.0</code>）。响应为 <code>audio/mpeg</code>，并使用 <code>Content-Disposition: inline</code>。",
         ttsDesc: "为给定文本流式返回 MP3 音频。",
         ttsReqBody: "请求体",

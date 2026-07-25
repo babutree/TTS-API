@@ -78,7 +78,17 @@
                 </div>
                 <textarea id="t" data-i18n-ph="placeholder"
                     class="w-full flex-1 min-h-[200px] sm:min-h-[340px] rounded-xl border border-slate-300 dark:border-white/15 bg-white/60 dark:bg-white/5 p-4 text-base sm:text-sm leading-relaxed text-slate-800 dark:text-slate-100 outline-none resize-none placeholder:text-slate-400 dark:placeholder:text-slate-500"
-                    placeholder="在这里粘贴想要朗读的文字，长文也可以…">你好，这是一个把文字变成语音的小工具。Hello, this is a handy tool for converting text into speech. 直接点击下面的朗读按钮，就能听到这段示例文字的声音。Simply click the Read Aloud button below to hear this sample text spoken. 你也可以把这里的内容换成自己想听的文字，再选择喜欢的音色和语速。You can also replace the content with your own text and choose your preferred voice and speaking speed. Enjoy the seamless experience!</textarea>
+                    placeholder="在这里粘贴想要朗读的文字，长文也可以…"># TTS-API 开箱试听
+
+这是一个**流式**文字转语音服务：本机 Kokoro 可离线合成，微软 Edge 提供在线音色，也支持可编程 API。
+
+- 粘贴 Markdown 也可以——标题、列表、**粗体**、行内代码会在朗读前自动清理
+- Auto 模式按句识别中英文，无缝切换对应音色
+- 需要集成？REST `POST /api/tts` 返回 MP3，WebSocket 推送 PCM
+
+Hello — paste **Markdown**, click Read, and stream speech in real time.
+Need an API? Call `POST /api/tts` for MP3, or open the [docs](/api) live tester.
+Docker one-liner gets you a ready UI plus dual engines.</textarea>
             </div>
 
             <!-- 右栏：设置(占 1/3) -->
@@ -232,6 +242,7 @@ const I18N = {
         st_playing: "播放中", st_paused: "已暂停", st_done: "完成", st_error: "出错",
         vf: "女声", vm: "男声",
         tagLocal: "本地", tagOnline: "在线",
+        dialectCantonese: "粤语", dialectTaiwan: "台湾", dialectLiaoning: "东北", dialectShaanxi: "陕西",
     },
     en: {
         docTitle: "TTS-API",
@@ -265,6 +276,7 @@ const I18N = {
         st_playing: "Playing", st_paused: "Paused", st_done: "Done", st_error: "Error",
         vf: "Female", vm: "Male",
         tagLocal: "Local", tagOnline: "Online",
+        dialectCantonese: "Cantonese", dialectTaiwan: "Taiwan", dialectLiaoning: "Northeastern", dialectShaanxi: "Shaanxi",
     },
 };
 let currentLang = localStorage.getItem("lang") === "zh" ? "zh" : "en";
@@ -308,7 +320,7 @@ function toggleLang() {
 // label 运行时按当前界面语言用 t(gender) 拼出，随语言切换刷新。
 // 单一事实源为后端 /api/voices：页面加载时拉取全部音色填充下拉，避免前后端列表漂移。
 // kokoro 为固定列表(全量)；edge 为微软动态列表(数百个)，按主流 locale 白名单精简。
-const EDGE_LOCALE_WHITELIST = ["zh-CN", "en-US", "en-GB"];
+const EDGE_LOCALE_WHITELIST = ["zh-CN", "zh-CN-liaoning", "zh-CN-shaanxi", "zh-HK", "zh-TW", "en-US", "en-GB"];
 let voiceDatabase = { kokoro: [], edge: [] };
 // 音色目录是否就绪：/api/voices 成功且非空才置真。未就绪禁止发起合成，避免发空/无效 voice。
 let voicesReady = false;
@@ -320,13 +332,30 @@ function toGenderKey(rawGender) {
     return String(rawGender || "").toLowerCase().startsWith("f") ? "vf" : "vm";
 }
 
-// locale → 短区域码(US/UK/CN)，避免微软 FriendlyName 里 "United States" 之类冗长文案
-const LOCALE_SHORT = { "en-US": "US", "en-GB": "UK", "zh-CN": "CN" };
+// locale → 短区域码(US/UK/CN)，避免微软 FriendlyName 里 "United States" 之类冗长文案。
+// 中文各 locale(普通话/方言/粤语/台湾)统一归 CN：均属中国、均进中文下拉、均被 isZhVoice 判为中文，
+// 语言路由零改动；具体方言差异由音色名后缀标注(见 EDGE_DIALECT_TAG + voiceLabel)。
+const LOCALE_SHORT = {
+    "en-US": "US", "en-GB": "UK",
+    "zh-CN": "CN", "zh-CN-liaoning": "CN", "zh-CN-shaanxi": "CN",
+    "zh-HK": "CN", "zh-TW": "CN",
+};
 
-// 从 Edge ShortName(如 en-US-AvaNeural)解析干净专名 Ava；微软 FriendlyName 太长且含
+// 中文非普通话 locale → 方言标注(拼在音色名后，让用户知道自己在选什么)。
+// 普通话 zh-CN 不标注(默认)。i18n 键，随界面语言切换。
+const EDGE_DIALECT_TAG = {
+    "zh-CN-liaoning": "dialectLiaoning",
+    "zh-CN-shaanxi": "dialectShaanxi",
+    "zh-HK": "dialectCantonese",
+    "zh-TW": "dialectTaiwan",
+};
+
+// 从 Edge ShortName 解析干净专名；微软 FriendlyName 太长且含
 // "Online...(Natural) - English (United States)"，与前端 "在线" tag 重复，故弃用。
+// 兼容两段式(en-US-AvaNeural → Ava)与三段式方言(zh-CN-liaoning-XiaobeiNeural → Xiaobei)：
+// 取最后一个 '-' 到 'Neural'/'Multilingual' 之间的人名段，剥掉 locale/方言前缀。
 function parseEdgeName(shortName) {
-    const m = String(shortName || "").match(/^[a-z]{2}-[A-Z]{2}-(.+?)(?:Neural|Multilingual.*)?$/);
+    const m = String(shortName || "").match(/^[a-z]{2}-[A-Z]{2}(?:-[a-z]+)?-(.+?)(?:Neural|Multilingual.*)?$/);
     return m ? m[1] : shortName;
 }
 
@@ -349,6 +378,7 @@ async function loadVoices() {
             gender: toGenderKey(v.gender),
             name: parseEdgeName(v.id),
             region: LOCALE_SHORT[v.locale] || v.locale,
+            dialect: EDGE_DIALECT_TAG[v.locale] || "",   // 方言标注(i18n 键)：普通话为空，粤语/台湾/东北/陕西非空
         }));
     updateVoices();
     voicesReady = true;
@@ -356,8 +386,14 @@ async function loadVoices() {
     return voiceDatabase;
 }
 
-// 音色显示 label(随界面语言)：性别 · 专名 · 区域。统一命名规范，各引擎一致。
-function voiceLabel(v) { return `${t(v.gender)} · ${v.name} · ${v.region}`; }
+// 音色显示 label(随界面语言)：性别 · 专名[(方言)] · 区域。统一命名规范，各引擎一致。
+// 中文非普通话音色(粤语/台湾/东北/陕西)在专名后括注方言；括号随 UI 语言：中文全角、英文半角。
+function voiceLabel(v) {
+    if (!v.dialect) return `${t(v.gender)} · ${v.name} · ${v.region}`;
+    const open = currentLang === "zh" ? "（" : "(";
+    const close = currentLang === "zh" ? "）" : ")";
+    return `${t(v.gender)} · ${v.name}${open}${t(v.dialect)}${close} · ${v.region}`;
+}
 
 // 音色 → 引擎：本地 Kokoro 前缀 zf_/zm_/af_/am_，其余为 Edge 在线
 function engineOfVoice(voice) {
@@ -494,14 +530,51 @@ function selectedVoicesReady() {
     return Boolean(document.getElementById("voice").value);
 }
 
-function selectedPreviewVoice() {
+// Auto 模式返回 [中文, 英文] 两个试听目标；单引擎只返回当前下拉音色。
+// 此前 Auto 只取 voiceZh，英文音色永远听不到——用户反馈的试听缺口。
+function selectedPreviewTargets() {
     const engine = document.getElementById("engine").value;
     if (engine === "auto") {
-        const voice = document.getElementById("voiceZh").value || document.getElementById("voiceEnAuto").value;
-        return { engine: engineOfVoice(voice), voice };
+        const zh = document.getElementById("voiceZh").value;
+        const en = document.getElementById("voiceEnAuto").value;
+        const out = [];
+        if (zh) out.push({ engine: engineOfVoice(zh), voice: zh });
+        if (en) out.push({ engine: engineOfVoice(en), voice: en });
+        return out;
     }
     const voice = document.getElementById("voice").value;
-    return { engine: engineOfVoice(voice), voice };
+    return voice ? [{ engine: engineOfVoice(voice), voice }] : [];
+}
+
+function selectedPreviewVoice() {
+    // 兼容旧名：取试听序列的第一项(单引擎即当前音色；Auto 为中文)。
+    return selectedPreviewTargets()[0] || { engine: "kokoro", voice: "" };
+}
+
+// 播放一段已解码 buffer，播完 resolve；stopAllSources 会打断当前预览。
+function playDecodedPreview(audioBuffer) {
+    return new Promise((resolve) => {
+        stopAllSources();
+        const src = ctx.createBufferSource();
+        src.buffer = audioBuffer;
+        src.connect(ctx.destination);
+        src.onended = () => {
+            sources = sources.filter(s => s !== src);
+            resolve();
+        };
+        sources.push(src);
+        src.start();
+    });
+}
+
+let previewSeq = 0; // 连点试听时作废上一次序列，避免两路预览交错
+
+// 作废进行中的试听序列(仅递增序号，不碰 sources)。主播放接管前调用：
+// 否则 Auto 试听的多段循环会在主播放 stopAllSources 后继续推进，
+// 其内部 playDecodedPreview 的 stopAllSources 会反过来掐掉刚起播的主音频。
+// 注意：不可并入 stopAllSources —— 试听自身也调它，并入会让 Auto 第二段(英文)永不播放。
+function cancelPreview() {
+    previewSeq++;
 }
 
 async function previewVoice() {
@@ -515,24 +588,30 @@ async function previewVoice() {
             return;
         }
     }
-    const picked = selectedPreviewVoice();
-    if (!picked.voice) { setStatus("error"); return; }
+    const targets = selectedPreviewTargets();
+    if (!targets.length) { setStatus("error"); return; }
     if (!ctx) initAudio();
     if (ctx.state === "suspended") { ctx.resume().catch(() => {}); }
-    const params = new URLSearchParams({ engine: picked.engine, voice: picked.voice, speed: String(currentSpeed) });
+    const seq = ++previewSeq;
     try {
-        const resp = await fetch(`/api/voices/preview?${params.toString()}`);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const arrayBuffer = await resp.arrayBuffer();
-        const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
-        stopAllSources();
-        const src = ctx.createBufferSource();
-        src.buffer = audioBuffer;
-        src.connect(ctx.destination);
-        src.start();
-        sources.push(src);
-        src.onended = () => { sources = sources.filter(s => s !== src); };
+        // Auto：中文样句 → 英文样句依次播放，与双下拉选择一致；单引擎只播一项。
+        for (const picked of targets) {
+            if (seq !== previewSeq) return;
+            const params = new URLSearchParams({
+                engine: picked.engine,
+                voice: picked.voice,
+                speed: String(currentSpeed),
+            });
+            const resp = await fetch(`/api/voices/preview?${params.toString()}`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            if (seq !== previewSeq) return;
+            const arrayBuffer = await resp.arrayBuffer();
+            const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+            if (seq !== previewSeq) return;
+            await playDecodedPreview(audioBuffer);
+        }
     } catch (err) {
+        if (seq !== previewSeq) return;
         console.error(err);
         setStatus("error");
     }
@@ -847,6 +926,7 @@ function maybeDone() {
 
 // 从指定位置开始播放(用于继续 / 跳转)
 function startPlayback(fromSec, lead) {
+    cancelPreview();   // 接管播放前作废进行中的试听
     stopAllSources();
     isPlaying = true;
     isPaused = false;
@@ -997,6 +1077,7 @@ async function start() {
     if (!ctx) initAudio();
     if (ctx.state === "suspended") { ctx.resume().catch(() => {}); }
     if (ws) { try { ws.onclose = null; ws.close(); } catch (_) {} ws = null; }
+    cancelPreview();   // 作废进行中的试听，避免其 stopAllSources 掐掉本次朗读
     stopAllSources();
     runIndex = 0;
     segWithinRun = 0;
@@ -1018,6 +1099,7 @@ async function start() {
 
 // 停止：清空一切
 function stop() {
+    cancelPreview();   // 主播放停止：作废进行中的试听序列，防其 stopAllSources 误触后续
     stopPumpTicker();
     stopAllSources();
     if (ws) { try { ws.close(); } catch (_) {} ws = null; }

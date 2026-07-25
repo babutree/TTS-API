@@ -161,5 +161,32 @@ class ToPcmTests(unittest.TestCase):
         self.assertEqual(len(app.to_pcm(audio)), 10)
 
 
+class PreviewTextTests(unittest.TestCase):
+    """试听样句语言须与音色一致：中文音色中文样句，英文音色英文样句。"""
+
+    def test_kokoro_chinese_voice_uses_chinese_sample(self):
+        text = app._preview_text("kokoro", "zf_xiaoxiao")
+        self.assertIn("你好", text)
+
+    def test_kokoro_english_voice_uses_english_sample(self):
+        text = app._preview_text("kokoro", "af_heart")
+        self.assertIn("Hello", text)
+
+    def test_edge_chinese_locale_uses_chinese_sample(self):
+        for voice in (
+            "zh-CN-XiaoxiaoNeural",
+            "zh-CN-liaoning-XiaobeiNeural",
+            "zh-HK-HiuGaaiNeural",
+            "zh-TW-HsiaoChenNeural",
+        ):
+            with self.subTest(voice=voice):
+                text = app._preview_text("edge", voice)
+                self.assertIn("你好", text, f"Edge Chinese voice {voice} should preview Chinese")
+
+    def test_edge_english_locale_uses_english_sample(self):
+        text = app._preview_text("edge", "en-US-AvaNeural")
+        self.assertIn("Hello", text)
+
+
 if __name__ == "__main__":
     unittest.main()

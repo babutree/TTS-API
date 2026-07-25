@@ -13,20 +13,33 @@
   <a href="README_CN.md">中文</a>
 </p>
 
-基于 FastAPI 构建的流式语音合成服务。本地可使用 CPU-only Kokoro 进行离线合成，也可使用微软 Edge TTS 进行云端合成，自带 Web 前端界面。
+**开箱即用的流式 TTS**——一条 `docker compose up` 同时拿到精致浏览器界面与可编程双引擎 API。本机 Kokoro（CPU、可离线）免费合成；微软 Edge TTS 提供自然在线音色。既服务页面用户，也服务脚本、浏览器扩展与后端集成。
+
+## 为什么选它
+
+| 你想… | 你得到… |
+|------|---------|
+| 浏览器里立刻试 | 打开 `/index.html`——粘贴文本（支持 Markdown）、选引擎/音色，流式 PCM 播放，可跳转/暂停 |
+| 代码里调用 | `POST /api/tts` → 流式 MP3；`/ws/tts` → 24 kHz 单声道 PCM；`/api` 带交互测试器 |
+| 不想折腾 GPU | CPU 版 PyTorch 轮子、镜像内置 `ffmpeg` + `espeak-ng`、模型挂卷缓存 |
+| 中英混排 | UI **Auto** 按句路由到对应音色（`engine: auto` 从不发往服务端） |
+| 安全地接外部程序 | 可选 `TTS_API_KEY`、同源 UI 免密、超时/并发闸门便于多用户部署 |
 
 ## 功能
 
 | 能力 | 说明 |
 |------|------|
-| 双引擎 | Kokoro 本地 + Edge 微软云端 |
-| 实时流式 | WebSocket 推送 PCM 帧，Web Audio API 连续播放 |
-| 语速控制 | 0.5x–2.0x (UI) / 0.5x–3.0x (API)，播放中可逐句切换 |
-| 跳转与暂停 | ±10s 跳转、暂停/继续、停止 |
-| 语言自动路由 | Auto 模式逐句检测中/英文，分配对应音色 |
-| REST API | POST /api/tts 返回流式 MP3 |
-| 深色模式 | 持久化主题切换 |
-| 中英文界面 | 语言实时切换 |
+| 双引擎 | Kokoro 本机（免费、可离线）+ Edge 微软云端（自然、多 locale） |
+| 实时流式 | WebSocket 二进制 PCM + 前瞻 Web Audio 调度（长 Edge 流不易卡死） |
+| 可编程 API | REST MP3 流、WebSocket PCM、音色列表/试听、密钥探测、交互式 `/api` 测试页 |
+| Markdown 安全输入 | 服务端朗读前剥离标题、列表、粗体/代码/链接，标记不会被读出 |
+| 语言自动路由 | UI Auto：中文句→中文音色、英文句→英文音色，无缝衔接 |
+| 中文 Edge locale | UI 白名单：普通话 + 东北/陕西方言、粤语（`zh-HK`）、台湾（`zh-TW`） |
+| 语速控制 | 0.5x–2.0x（UI）/ 0.5x–3.0x（API），播放中可逐句切换 |
+| 跳转与暂停 | ±10s、暂停/继续、停止，缓冲保留 |
+| 集成鉴权 | `TTS_API_KEY` 供 CRX/脚本；REST 优先 `X-API-Key`（与 Caddy Basic Auth 友好） |
+| 部署闸门 | 合成超时、ffmpeg / Kokoro 并发上限、CORS 白名单、就绪健康检查 |
+| 深色模式 + 中英界面 | 主题持久化；界面语言热切换 |
 
 ## 架构
 
