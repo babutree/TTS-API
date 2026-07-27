@@ -29,7 +29,11 @@ Rejected requests return `401` (REST) or WebSocket close code `1008` (handshake)
 | `TTS_API_KEY` | empty | Enables API key auth when set. |
 | `MAX_TEXT_LENGTH` | `100000` | Max input characters accepted by REST and WebSocket requests. |
 | `TTS_CORS_ALLOW_ORIGINS` | `*` | Comma-separated CORS allowed origins. Keep `*` for local/open use; set explicit origins for public deployments. |
-| `EDGE_VOICES_CACHE_TTL_SECONDS` | `86400` | Edge voice-list cache TTL. Refresh failures do not poison a successful stale cache. |
+| `EDGE_VOICES_CACHE_TTL_SECONDS` | `86400` | Non-negative finite Edge voice-list cache TTL. `0` disables retention between refresh waves; overlapping calls still share one in-flight refresh. |
+| `EDGE_RETRY_MAX_ATTEMPTS` | `2` | Positive integer total attempts for Edge voice-list calls and Edge synthesis before the first audio chunk. `1` disables application-level retries. |
+| `EDGE_RETRY_BASE_DELAY_SECONDS` | `0.25` | Non-negative finite base delay in seconds for exponential Edge retry backoff. `0` removes the wait between attempts. |
+| `EDGE_VOICES_FAILURE_COOLDOWN_SECONDS` | `5` | Non-negative finite cooldown after an exhausted Edge voice-list refresh. `0` disables post-wave cooldown; overlapping calls still share the failed refresh. |
+| `EDGE_VOICES_REQUEST_TIMEOUT_SECONDS` | `5` | Non-negative finite timeout in seconds per attempt to fetch the Edge voice catalog. `0` disables this timeout. |
 | `TTS_SYNTHESIS_TIMEOUT_SECONDS` | `0` | REST/WebSocket synthesis timeout. `0` disables it. REST returns `504` before audio starts; after streaming starts, timeout stops the stream and reaps resources. WebSocket returns `error`. |
 | `TTS_MAX_FFMPEG_PROCESSES` | `2` | Maximum concurrent `ffmpeg` subprocesses. Excess REST requests fail fast with `429`; WebSocket synthesis returns `error`. |
 | `TTS_MAX_SYNTHESIS_CONCURRENCY` | `2` | Maximum concurrent Kokoro inferences (shared by REST and WebSocket). Excess requests queue (block) rather than fail. WebSocket Kokoro produces no `ffmpeg` process, so this is its only concurrency guard. |
@@ -100,17 +104,21 @@ Health check. Returns the engine and `ffmpeg` readiness status.
 
 ```json
 {
-  "status": "v0.1 engine running",
-  "ready": true
+  "status": "v0.11 engine running",
+  "ready": true,
+  "max_text_length": 100000
 }
 ```
+
+`max_text_length` mirrors `MAX_TEXT_LENGTH` so clients (including the bundled UI) can align the input limit without a separate config endpoint. It is present on both `200` and `503` responses.
 
 ### Response `503` (engines not ready)
 
 ```json
 {
   "status": "starting",
-  "ready": false
+  "ready": false,
+  "max_text_length": 100000
 }
 ```
 
@@ -119,7 +127,8 @@ Health check. Returns the engine and `ffmpeg` readiness status.
 ```json
 {
   "status": "ffmpeg missing",
-  "ready": false
+  "ready": false,
+  "max_text_length": 100000
 }
 ```
 
@@ -148,7 +157,7 @@ List all available voices for both engines.
 }
 ```
 
-Edge voices are fetched live from Microsoft and cached for `EDGE_VOICES_CACHE_TTL_SECONDS` seconds. If a refresh fails after a successful fetch, the endpoint returns the stale cache instead of replacing it with an empty list.
+Edge voices are fetched live from Microsoft and cached for `EDGE_VOICES_CACHE_TTL_SECONDS` seconds. Concurrent expired-cache requests share one refresh. Each upstream request has an `EDGE_VOICES_REQUEST_TIMEOUT_SECONDS` timeout per attempt; `0` disables that timeout. A timeout, failed request, empty response, or malformed response is retried up to `EDGE_RETRY_MAX_ATTEMPTS` and never replaces a successful cache; after the final failure, the endpoint enters `EDGE_VOICES_FAILURE_COOLDOWN_SECONDS` cooldown and returns the last successful cache, or an empty Edge catalog when no successful cache exists.
 
 This endpoint returns the **full** Microsoft Edge catalog (no server-side locale filter). The bundled Web UI (`index.html`) further filters Edge voices to these locales only: `zh-CN`, `zh-CN-liaoning`, `zh-CN-shaanxi`, `zh-HK`, `zh-TW`, `en-US`, `en-GB`. Chinese dialect/regional locales are shown in the Chinese dropdown with a dialect tag (Cantonese / Taiwan / Northeastern / Shaanxi); Mandarin `zh-CN` has no tag. ShortNames and locales are owned by Microsoft — if a voice is renamed or removed upstream, it disappears from `/api/voices` and the UI without a local fallback catalog.
 
@@ -213,6 +222,8 @@ Stream MP3 audio for the given text.
 - Status `504` — Synthesis timed out before any audio was ready.
 
 Every REST `/api/tts` response includes `X-Request-ID`. A client may provide `X-Request-ID`; otherwise the server generates one. The same id is included in REST failure logs.
+
+Edge upstream failures, including a stream that ends without non-empty audio, are retried only while no non-empty Edge audio chunk has been observed. If all attempts fail before audio, REST returns `502` and WebSocket sends `error`. Once any non-empty audio chunk has arrived, automatic retry is permanently disabled for that request so a reconnect cannot duplicate already-produced speech; WebSocket still sends `error`, while REST may already be committed to a truncated `200` stream as described below.
 
 > Streaming edge case: once the first audio byte is committed the `200` status is locked and cannot be downgraded to an error code. The server preflights synthesis (waiting for the first source bytes before returning `200`), so failures that occur *before* streaming starts still surface as the correct `4xx`/`5xx`. But if transcoding fails *after* the first byte has been sent (e.g. an `ffmpeg` crash mid-stream, or a post-start timeout), the client receives a truncated or empty-tail `200` body rather than an error status. Clients should treat an unexpectedly short/empty `200` as a failure and check the correlating `X-Request-ID` in the server logs. This is an inherent limitation of HTTP streaming, not a recoverable status.
 

@@ -10,8 +10,16 @@ services:
       - MAX_TEXT_LENGTH=100000
       # 浏览器跨域来源白名单；本地/内网开放使用 *，公网部署建议改成实际域名，多个来源用英文逗号分隔。
       - TTS_CORS_ALLOW_ORIGINS=*
-      # Edge 在线音色列表缓存时间(秒)；刷新失败时会继续使用上一次成功缓存。
+      # Edge 在线音色列表缓存时间(有限非负秒数)；0 不跨刷新批次保留，并发刷新仍会合并。
       - EDGE_VOICES_CACHE_TTL_SECONDS=86400
+      # Edge 网络调用总尝试次数；1 表示关闭应用层重试。
+      - EDGE_RETRY_MAX_ATTEMPTS=2
+      # Edge 重试基础退避时间(有限非负秒数)，后续重试按指数增加；0 表示不等待。
+      - EDGE_RETRY_BASE_DELAY_SECONDS=0.25
+      # Edge 音色列表刷新连续失败后的冷却时间(有限非负秒数)；0 表示不跨刷新批次冷却。
+      - EDGE_VOICES_FAILURE_COOLDOWN_SECONDS=5
+      # Edge 音色列表每次上游请求的超时(有限非负秒数)；0 表示关闭。
+      - EDGE_VOICES_REQUEST_TIMEOUT_SECONDS=5
       # 单请求合成 wall-clock 超时(秒)；0 表示关闭。公网/多用户部署建议设置为非 0。
       - TTS_SYNTHESIS_TIMEOUT_SECONDS=0
       # ffmpeg 子进程并发上限；超限显式拒绝请求，避免 CPU/内存被打满。

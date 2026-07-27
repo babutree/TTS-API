@@ -3,9 +3,11 @@ import asyncio
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import uuid
@@ -25,6 +27,10 @@ from kokoro import KPipeline
 LOG_MAX_LINES = 1000
 DEFAULT_MAX_TEXT_LENGTH = 100000
 DEFAULT_EDGE_VOICES_CACHE_TTL_SECONDS = 86400.0
+DEFAULT_EDGE_RETRY_MAX_ATTEMPTS = 2
+DEFAULT_EDGE_RETRY_BASE_DELAY_SECONDS = 0.25
+DEFAULT_EDGE_VOICES_FAILURE_COOLDOWN_SECONDS = 5.0
+DEFAULT_EDGE_VOICES_REQUEST_TIMEOUT_SECONDS = 5.0
 DEFAULT_MAX_FFMPEG_PROCESSES = 2
 DEFAULT_MAX_SYNTHESIS_CONCURRENCY = 2
 REQUEST_ID_MAX_LENGTH = 64
@@ -68,15 +74,15 @@ def parse_max_text_length(value: str | None) -> int:
 
 def parse_edge_voices_cache_ttl(value: str | None) -> float:
     ttl = float(value or DEFAULT_EDGE_VOICES_CACHE_TTL_SECONDS)
-    if ttl < 0:
-        raise ValueError("EDGE_VOICES_CACHE_TTL_SECONDS must be >= 0")
+    if not math.isfinite(ttl) or ttl < 0:
+        raise ValueError("EDGE_VOICES_CACHE_TTL_SECONDS must be finite and >= 0")
     return ttl
 
 
 def parse_optional_positive_float(value: str | None, name: str) -> float:
     parsed = float(value or 0)
-    if parsed < 0:
-        raise ValueError(f"{name} must be >= 0")
+    if not math.isfinite(parsed) or parsed < 0:
+        raise ValueError(f"{name} must be finite and >= 0")
     return parsed
 
 
@@ -100,6 +106,26 @@ MAX_TEXT_LENGTH = parse_max_text_length(os.environ.get("MAX_TEXT_LENGTH"))
 EDGE_VOICES_CACHE_TTL_SECONDS = parse_edge_voices_cache_ttl(
     os.environ.get("EDGE_VOICES_CACHE_TTL_SECONDS")
 )
+EDGE_RETRY_MAX_ATTEMPTS = parse_positive_int(
+    os.environ.get("EDGE_RETRY_MAX_ATTEMPTS"),
+    "EDGE_RETRY_MAX_ATTEMPTS",
+    DEFAULT_EDGE_RETRY_MAX_ATTEMPTS,
+)
+EDGE_RETRY_BASE_DELAY_SECONDS = parse_optional_positive_float(
+    os.environ.get("EDGE_RETRY_BASE_DELAY_SECONDS")
+    or str(DEFAULT_EDGE_RETRY_BASE_DELAY_SECONDS),
+    "EDGE_RETRY_BASE_DELAY_SECONDS",
+)
+EDGE_VOICES_FAILURE_COOLDOWN_SECONDS = parse_optional_positive_float(
+    os.environ.get("EDGE_VOICES_FAILURE_COOLDOWN_SECONDS")
+    or str(DEFAULT_EDGE_VOICES_FAILURE_COOLDOWN_SECONDS),
+    "EDGE_VOICES_FAILURE_COOLDOWN_SECONDS",
+)
+EDGE_VOICES_REQUEST_TIMEOUT_SECONDS = parse_optional_positive_float(
+    os.environ.get("EDGE_VOICES_REQUEST_TIMEOUT_SECONDS")
+    or str(DEFAULT_EDGE_VOICES_REQUEST_TIMEOUT_SECONDS),
+    "EDGE_VOICES_REQUEST_TIMEOUT_SECONDS",
+)
 CORS_ALLOW_ORIGINS = parse_cors_allow_origins(os.environ.get("TTS_CORS_ALLOW_ORIGINS"))
 TTS_SYNTHESIS_TIMEOUT_SECONDS = parse_optional_positive_float(
     os.environ.get("TTS_SYNTHESIS_TIMEOUT_SECONDS"), "TTS_SYNTHESIS_TIMEOUT_SECONDS"
@@ -120,18 +146,27 @@ class FfmpegLimiter:
     def __init__(self, max_active: int):
         self.max_active = max_active
         self.active = 0
+        self.active_prefetch = 0
         self._lock = asyncio.Lock()
 
-    async def acquire(self) -> bool:
+    async def acquire(self, prefetch: bool = False) -> bool:
         async with self._lock:
             if self.active >= self.max_active:
                 return False
+            # 投机预取不得占满全部 decoder：至少给普通 REST/WS 请求保留一个槽。
+            # max_active=1 时预取直接失败并由浏览器按主请求回退。
+            if prefetch and self.active_prefetch >= self.max_active - 1:
+                return False
             self.active += 1
+            if prefetch:
+                self.active_prefetch += 1
             return True
 
-    def release(self):
+    def release(self, prefetch: bool = False):
         if self.active > 0:
             self.active -= 1
+        if prefetch and self.active_prefetch > 0:
+            self.active_prefetch -= 1
 
 
 _ffmpeg_limiter = FfmpegLimiter(TTS_MAX_FFMPEG_PROCESSES)
@@ -223,21 +258,59 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
-@app.middleware("http")
-async def api_key_middleware(request: Request, call_next):
-    # 未配置密钥 = 完全开放；豁免路径直接放行；同源自有页面免密；否则校验 REST 密钥。
-    path = request.url.path
-    # /api/auth 和 /api/logs 不走同源豁免，由端点自身校验密钥，
-    # 使 api.html 测试器与 CRX 能真实验证密钥有效性(同源也需正确密钥才通过)。
-    if path in ("/api/auth", "/api/logs"):
-        return await call_next(request)
-    if not TTS_API_KEY or path in _AUTH_EXEMPT_PATHS:
-        return await call_next(request)
-    if _is_same_origin(request.headers):
-        return await call_next(request)
-    if _key_matches(_extract_rest_key(request.headers)):
-        return await call_next(request)
-    return JSONResponse(status_code=401, content={"detail": "缺少或错误的 API Key"})
+class ApiKeyMiddleware:
+    """纯 ASGI 鉴权；保持断连取消语义，不经 BaseHTTPMiddleware 改写为 500。"""
+
+    def __init__(self, asgi_app):
+        self.app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive)
+        path = request.url.path
+        # /api/auth 和 /api/logs 不走同源豁免，由端点自身校验密钥，
+        # 使 api.html 测试器与 CRX 能真实验证密钥有效性(同源也需正确密钥才通过)。
+        authorized = (
+            path in ("/api/auth", "/api/logs")
+            or not TTS_API_KEY
+            or path in _AUTH_EXEMPT_PATHS
+            or _is_same_origin(request.headers)
+            or _key_matches(_extract_rest_key(request.headers))
+        )
+        if authorized:
+            await self.app(scope, receive, send)
+            return
+
+        response = JSONResponse(
+            status_code=401,
+            content={"detail": "缺少或错误的 API Key"},
+        )
+        await response(scope, receive, send)
+
+
+class _HttpRequestDisconnected(Exception):
+    """请求已由 ASGI receive 明确报告断连，无 HTTP 响应可再发送。"""
+
+
+class _HttpDisconnectMiddleware:
+    """让已确认断连的 HTTP 请求静默结束，避免服务器误记应用异常。"""
+
+    def __init__(self, asgi_app):
+        self.app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await self.app(scope, receive, send)
+        except _HttpRequestDisconnected:
+            if scope["type"] != "http":
+                raise
+
+
+app.add_middleware(ApiKeyMiddleware)
+app.add_middleware(_HttpDisconnectMiddleware)
 
 
 # CORS 必须在鉴权中间件之后添加(Starlette 中间件后加者位于外层)，
@@ -256,12 +329,20 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 @app.get("/")
 async def root():
-    # 健康检查需真正反映引擎可用性：pipeline 未就绪则返回 503，避免容器被误判为健康
+    # 健康检查需真正反映引擎可用性：pipeline 未就绪则返回 503，避免容器被误判为健康。
+    # max_text_length 始终下发，供 UI 与客户端在合成前对齐上限(与 REST/WS 同一事实源)。
+    limits = {"max_text_length": MAX_TEXT_LENGTH}
     if pipeline_zh is None or pipeline_en is None:
-        return JSONResponse(status_code=503, content={"status": "starting", "ready": False})
+        return JSONResponse(
+            status_code=503,
+            content={"status": "starting", "ready": False, **limits},
+        )
     if shutil.which("ffmpeg") is None:
-        return JSONResponse(status_code=503, content={"status": "ffmpeg missing", "ready": False})
-    return {"status": "v0.1 engine running", "ready": True}
+        return JSONResponse(
+            status_code=503,
+            content={"status": "ffmpeg missing", "ready": False, **limits},
+        )
+    return {"status": "v0.11 engine running", "ready": True, **limits}
 
 @app.get("/index.html")
 async def index():
@@ -340,7 +421,7 @@ async def startup():
         for _ in pipeline_en("warm up", voice="af_heart", speed=1.0):
             break
     await asyncio.to_thread(_warmup)
-    logger.info("v0.1 engine ready")
+    logger.info("v0.11 engine ready")
 
 
 def to_pcm(audio: np.ndarray) -> bytes:
@@ -560,22 +641,100 @@ def parse_ws_request(req: dict):
 
 _edge_voices_cache = None
 _edge_voices_cache_expires_at = 0.0
+_edge_voices_retry_after = 0.0
+_edge_voices_refresh_lock = None
+_edge_voices_refresh_generation = 0
+
+
+def _get_edge_voices_refresh_lock() -> asyncio.Lock:
+    global _edge_voices_refresh_lock
+    if _edge_voices_refresh_lock is None:
+        _edge_voices_refresh_lock = asyncio.Lock()
+    return _edge_voices_refresh_lock
+
+
+def _validate_edge_voice_catalog(voices):
+    if (
+        not isinstance(voices, list)
+        or not voices
+        or any(
+            not isinstance(voice, dict)
+            or not isinstance(voice.get("ShortName"), str)
+            or not voice["ShortName"].strip()
+            for voice in voices
+        )
+    ):
+        raise RuntimeError("Edge voices returned an invalid catalog")
+    return voices
+
 
 async def _get_edge_voices():
     global _edge_voices_cache, _edge_voices_cache_expires_at
+    global _edge_voices_retry_after, _edge_voices_refresh_generation
     now = time.monotonic()
     if _edge_voices_cache is not None and now < _edge_voices_cache_expires_at:
         return _edge_voices_cache
-    try:
-        # 仅在成功时写缓存；失败返回空列表但不缓存，下次请求可重试(避免瞬时网络抖动永久毒化)
-        _edge_voices_cache = await edge_tts.list_voices()
-        _edge_voices_cache_expires_at = now + EDGE_VOICES_CACHE_TTL_SECONDS
-        return _edge_voices_cache
-    except Exception as exc:
-        if _edge_voices_cache is not None:
-            logger.warning("Edge voices refresh failed; serving stale cache: %s", exc)
+    if now < _edge_voices_retry_after:
+        return _edge_voices_cache if _edge_voices_cache is not None else []
+    observed_generation = _edge_voices_refresh_generation
+
+    # 双重检查 + 单飞刷新：过期瞬间的并发请求共用一次上游刷新，避免放大网络故障。
+    async with _get_edge_voices_refresh_lock():
+        now = time.monotonic()
+        if _edge_voices_cache is not None and now < _edge_voices_cache_expires_at:
             return _edge_voices_cache
-        return []
+        if now < _edge_voices_retry_after:
+            return _edge_voices_cache if _edge_voices_cache is not None else []
+        # TTL/cooldown 为 0 时，时间判断无法识别“等待期间已有刷新完成”。
+        # 代次只合并真正重叠的调用，不会把刷新完成后才到达的新请求继续缓存。
+        if _edge_voices_refresh_generation != observed_generation:
+            return _edge_voices_cache if _edge_voices_cache is not None else []
+
+        attempts = max(1, EDGE_RETRY_MAX_ATTEMPTS)
+        for attempt in range(attempts):
+            try:
+                voices = _validate_edge_voice_catalog(
+                    await asyncio.wait_for(
+                        edge_tts.list_voices(),
+                        timeout=EDGE_VOICES_REQUEST_TIMEOUT_SECONDS or None,
+                    )
+                )
+            except Exception as exc:
+                if attempt + 1 < attempts:
+                    logger.warning(
+                        "Edge voices refresh failed (attempt %s/%s); retrying: %r",
+                        attempt + 1, attempts, exc,
+                    )
+                    delay = EDGE_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
+                    if delay:
+                        await asyncio.sleep(delay)
+                    continue
+
+                _edge_voices_retry_after = (
+                    time.monotonic() + EDGE_VOICES_FAILURE_COOLDOWN_SECONDS
+                )
+                _edge_voices_refresh_generation += 1
+                if _edge_voices_cache is not None:
+                    logger.warning(
+                        "Edge voices refresh failed after %s attempt(s); "
+                        "serving stale cache: %r",
+                        attempts, exc,
+                    )
+                    return _edge_voices_cache
+                logger.warning(
+                    "Edge voices unavailable after %s attempt(s); "
+                    "serving empty catalog: %r",
+                    attempts, exc,
+                )
+                return []
+
+            _edge_voices_cache = voices
+            _edge_voices_cache_expires_at = (
+                time.monotonic() + EDGE_VOICES_CACHE_TTL_SECONDS
+            )
+            _edge_voices_retry_after = 0.0
+            _edge_voices_refresh_generation += 1
+            return _edge_voices_cache
 
 @app.get("/api/voices")
 async def api_voices():
@@ -622,12 +781,56 @@ async def _create_mp3_encoder(engine: str):
         raise
 
 
+async def _iter_edge_audio(text: str, voice: str, rate: str, cancel_event=None):
+    """产出 Edge 音频块；仅在尚未观察到非空音频时重试上游失败。"""
+    audio_started = False
+    attempts = max(1, EDGE_RETRY_MAX_ATTEMPTS)
+
+    for attempt in range(attempts):
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        try:
+            communicate = edge_tts.Communicate(text, voice, rate=rate)
+            async for chunk in communicate.stream():
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                if chunk["type"] != "audio":
+                    continue
+                data = chunk["data"]
+                if not data:
+                    continue
+                # 从这里开始禁止自动重试：即使消费者随后写管道失败，重连也可能重复朗读。
+                audio_started = True
+                yield data
+            if audio_started:
+                return
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            raise RuntimeError("Edge synthesis produced no audio")
+        except Exception as exc:
+            if audio_started or attempt + 1 >= attempts:
+                raise
+            if cancel_event is not None and cancel_event.is_set():
+                return
+
+            logger.warning(
+                "Edge synthesis failed before first audio "
+                "(voice=%s attempt=%s/%s); retrying: %s",
+                voice, attempt + 1, attempts, exc,
+            )
+            delay = EDGE_RETRY_BASE_DELAY_SECONDS * (2 ** attempt)
+            if delay:
+                await asyncio.sleep(delay)
+            if cancel_event is not None and cancel_event.is_set():
+                return
+
+
 async def _feed_mp3(proc, text: str, engine: str, voice: str, speed: float, first_audio=None):
     # first_audio(asyncio.Event)：产出首个音频源字节时置位，供 REST 预检判定"是否真正产出音频"。
     # 判定基于喂入 ffmpeg 的音频源(而非 ffmpeg 输出)，避免 mp3 muxer 空输入仍吐头字节造成误判成功。
-    # 关键：_mark() 必须在 write/drain 之前置位。预检期 _stream_mp3 尚未启动、无人读 proc.stdout，
-    # 若首块 PCM 撑满 ffmpeg 管道缓冲，drain() 会阻塞；把 _mark() 放 drain 之后将导致 first_audio
-    # 永不置位、预检 hang 死。判定信号本就是"音频源已产出(pcm 非空)"，无需等 ffmpeg 消费。
+    # 关键：_mark() 必须在 write 成功后、drain 之前置位。预检期 _stream_mp3 尚未启动、
+    # 无人读 proc.stdout，若首块 PCM 撑满 ffmpeg 管道缓冲，drain() 会阻塞；但 write()
+    # 同步失败时不得误报已有音频，否则 REST 会把确定失败伪装成 200。
     def _mark():
         if first_audio is not None:
             first_audio.set()
@@ -637,17 +840,15 @@ async def _feed_mp3(proc, text: str, engine: str, voice: str, speed: float, firs
             for sent in sentences:
                 pcm = await run_kokoro(sent, voice, speed)
                 if pcm:
-                    _mark()
                     proc.stdin.write(pcm)
+                    _mark()
                     await proc.stdin.drain()
         else:
             rate = f"{int((speed - 1) * 100):+d}%"
-            comm = edge_tts.Communicate(text, voice, rate=rate)
-            async for chunk in comm.stream():
-                if chunk["type"] == "audio":
-                    _mark()
-                    proc.stdin.write(chunk["data"])
-                    await proc.stdin.drain()
+            async for data in _iter_edge_audio(text, voice, rate):
+                proc.stdin.write(data)
+                _mark()
+                await proc.stdin.drain()
     finally:
         try:
             proc.stdin.close()
@@ -655,19 +856,79 @@ async def _feed_mp3(proc, text: str, engine: str, voice: str, speed: float, firs
             pass
 
 
+async def _await_cleanup(awaitable):
+    """等待清理动作结束；外层取消会延后传播，但不会被吞掉。"""
+    cleanup_task = asyncio.ensure_future(awaitable)
+    active_exception = sys.exc_info()[1]
+    cancellation_error = (
+        active_exception
+        if isinstance(active_exception, asyncio.CancelledError)
+        else None
+    )
+    while True:
+        try:
+            result = await asyncio.shield(cleanup_task)
+            break
+        except asyncio.CancelledError as exc:
+            # cleanup_task 自身取消时没有可继续等待的清理；直接保留该语义。
+            if cleanup_task.cancelled():
+                if cancellation_error is not None:
+                    raise cancellation_error
+                raise
+            if cancellation_error is None:
+                cancellation_error = exc
+        except Exception as exc:
+            if cancellation_error is not None:
+                raise cancellation_error from exc
+            raise
+    if cancellation_error is not None:
+        raise cancellation_error
+    return result
+
+
 async def _reap_proc(proc):
-    # 回收 ffmpeg 子进程，避免僵尸。幂等：已退出则仅 wait。
+    # 回收 ffmpeg 子进程并释放配额；调用方必须保持单一所有权，禁止重复进入。
     if proc.returncode is None:
         try:
             proc.kill()
         except ProcessLookupError:
             pass
-    await proc.wait()
-    _ffmpeg_limiter.release()
+    try:
+        await _await_cleanup(proc.wait())
+    finally:
+        _ffmpeg_limiter.release()
 
 
-async def _create_edge_pcm_decoder():
-    acquired = await _ffmpeg_limiter.acquire()
+async def _finalize_mp3_session(proc, feed_task, engine=None, voice=None):
+    try:
+        if not feed_task.done():
+            feed_task.cancel()
+        try:
+            await feed_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            if engine is None:
+                logger.debug("Discarded REST feed failed during cleanup: %s", exc)
+            else:
+                logger.error(
+                    "feed task failed after stream start (engine=%s voice=%s): %s",
+                    engine,
+                    voice,
+                    exc,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+    finally:
+        await _reap_proc(proc)
+
+
+async def _dispose_mp3_session(proc, feed_task):
+    """回收尚未交给 StreamingResponse 的预检资源。"""
+    await _finalize_mp3_session(proc, feed_task)
+
+
+async def _create_edge_pcm_decoder(prefetch: bool = False):
+    acquired = await _ffmpeg_limiter.acquire(prefetch=prefetch)
     if not acquired:
         raise RuntimeError("ffmpeg process limit reached")
     try:
@@ -677,18 +938,20 @@ async def _create_edge_pcm_decoder():
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         )
     except BaseException:
-        _ffmpeg_limiter.release()
+        _ffmpeg_limiter.release(prefetch=prefetch)
         raise
 
 
-async def _reap_edge_pcm_decoder(process):
+async def _reap_edge_pcm_decoder(process, prefetch: bool = False):
     if process.returncode is None:
         try:
             process.kill()
         except ProcessLookupError:
             pass
-    await process.wait()
-    _ffmpeg_limiter.release()
+    try:
+        await _await_cleanup(process.wait())
+    finally:
+        _ffmpeg_limiter.release(prefetch=prefetch)
 
 
 async def _start_synthesis(text: str, engine: str, voice: str, speed: float, request_id: str = ""):
@@ -713,37 +976,29 @@ async def _start_synthesis(text: str, engine: str, voice: str, speed: float, req
             timeout=timeout,
         )
         if not done:
-            first_audio_wait.cancel()
-            if not feed_task.done():
-                feed_task.cancel()
-                try:
-                    await feed_task
-                except asyncio.CancelledError:
-                    pass
-            await _reap_proc(proc)
+            # 统一交给下方 BaseException 路径取消任务并回收一次，避免并发下重复释放配额。
             raise HTTPException(status_code=504, detail="synthesis timed out")
+        if first_audio.is_set() and not feed_task.done():
+            await asyncio.sleep(0)
     except BaseException:
         first_audio_wait.cancel()
-        if not feed_task.done():
-            feed_task.cancel()
-            try:
-                await feed_task
-            except asyncio.CancelledError:
-                pass
-        elif not feed_task.cancelled():
-            # 竞态：取消与 feed 结束同刻发生，feed_task 已 done。若带异常必须取出，
-            # 否则 GC 时抛 "Task exception was never retrieved"。
-            feed_task.exception()
-        await _reap_proc(proc)
+        await _await_cleanup(_dispose_mp3_session(proc, feed_task))
         raise
 
-    if first_audio.is_set():
-        first_audio_wait.cancel()  # 有音频：feed_task 继续喂后续内容，仅取消等待哨兵
+    # 首音频事件与 feed 异常可能同一轮发生。让出一轮后复查已完成任务，
+    # 在提交 HTTP 200 前优先暴露已经确定的失败；仍在运行的 feed 才交给流式响应。
+    first_audio_wait.cancel()
+    if first_audio.is_set() and not feed_task.done():
+        return proc, feed_task
+    if feed_task.cancelled():
+        await _reap_proc(proc)
+        raise asyncio.CancelledError()
+
+    exc = feed_task.exception()
+    if first_audio.is_set() and exc is None:
         return proc, feed_task
 
-    # 无音频产出：清理哨兵与子进程，区分"异常失败"与"无可发音内容"，诚实回传错误(不伪装成功)
-    first_audio_wait.cancel()
-    exc = feed_task.exception()
+    # 无音频或预检期 feed 已失败：回收资源，区分引擎错误与无可发音内容。
     await _reap_proc(proc)
     if exc is not None:
         # edge 归为上游(微软)故障 502，kokoro 归为本机引擎故障 500；不用 4xx 以免误判可重试的抖动
@@ -756,7 +1011,119 @@ async def _start_synthesis(text: str, engine: str, voice: str, speed: float, req
     raise HTTPException(status_code=400, detail="no speakable content for the given voice")
 
 
-async def _stream_mp3(proc, feed_task, engine, voice):
+async def _wait_for_http_disconnect(request: Request, disconnect_seen):
+    # FastAPI 已在进入 endpoint 前完成请求体解析；这里只消费其后的 ASGI 生命周期消息。
+    while True:
+        message = await request.receive()
+        if message.get("type") == "http.disconnect":
+            disconnect_seen.set()
+            return
+
+
+async def _dispose_synthesis_task(task):
+    """取消未交付的预检任务；若它已产出 session，则接管并回收。"""
+    if not task.done():
+        task.cancel()
+    try:
+        session = await task
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        # 请求已不可继续；取出并记录同刻完成的预检异常，避免 never-retrieved 告警。
+        logger.debug("Discarded REST preflight failed during cleanup: %s", exc)
+        return
+    await _dispose_mp3_session(*session)
+
+
+async def _stop_disconnect_watcher(watcher):
+    if not watcher.done():
+        watcher.cancel()
+    # 把 watcher 自身的 CancelledError 吸收在独立 cleanup task 内；若 owner 此时
+    # 被外部取消，_await_cleanup 会等 receive 真正退出后再恢复该取消语义。
+    async def finish():
+        try:
+            await watcher
+        except asyncio.CancelledError:
+            pass
+        if not watcher.cancelled():
+            watcher.result()
+
+    await _await_cleanup(finish())
+
+
+async def _start_synthesis_for_request(
+    request: Request,
+    text: str,
+    engine: str,
+    voice: str,
+    speed: float,
+    request_id: str = "",
+):
+    disconnect_seen = asyncio.Event()
+    synthesis_task = asyncio.create_task(
+        _start_synthesis(text, engine, voice, speed, request_id)
+    )
+    watcher = asyncio.create_task(
+        _wait_for_http_disconnect(request, disconnect_seen)
+    )
+    session = None
+    try:
+        done, _ = await asyncio.wait(
+            {synthesis_task, watcher},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if watcher in done:
+            # watcher 正常完成只可能是明确的 http.disconnect；receive 异常原样传播。
+            watcher.result()
+            abandoned_task = synthesis_task
+            synthesis_task = None
+            await _await_cleanup(_dispose_synthesis_task(abandoned_task))
+            raise _HttpRequestDisconnected()
+
+        completed_task = synthesis_task
+        synthesis_task = None
+        session = completed_task.result()
+        await _stop_disconnect_watcher(watcher)
+        watcher = None
+        # 停止 receive 的同一时刻仍可能交付 disconnect；此时 session 尚未交接，
+        # 必须就地回收，不能让 StreamingResponse 再发送响应头。
+        if disconnect_seen.is_set():
+            abandoned_session = session
+            session = None
+            await _await_cleanup(_dispose_mp3_session(*abandoned_session))
+            raise _HttpRequestDisconnected()
+        result = session
+        session = None
+        return result
+    except BaseException:
+        if synthesis_task is not None:
+            abandoned_task = synthesis_task
+            synthesis_task = None
+            await _await_cleanup(_dispose_synthesis_task(abandoned_task))
+        if session is not None:
+            abandoned_session = session
+            session = None
+            await _await_cleanup(_dispose_mp3_session(*abandoned_session))
+        raise
+    finally:
+        if watcher is not None:
+            await _stop_disconnect_watcher(watcher)
+
+
+class _Mp3CleanupClaim:
+    """在响应包装器与音频生成器之间同步转移唯一清理权。"""
+
+    def __init__(self):
+        self._claimed = False
+
+    def claim(self):
+        if self._claimed:
+            return False
+        self._claimed = True
+        return True
+
+
+async def _stream_mp3(proc, feed_task, engine, voice, cleanup_claim=None):
     # 流式读取 ffmpeg 输出。proc/feed_task 由 _start_synthesis 预检后传入(首音频已确认)。
     try:
         while True:
@@ -779,19 +1146,38 @@ async def _stream_mp3(proc, feed_task, engine, voice):
             proc.kill()
         raise
     finally:
-        if not feed_task.done():
-            feed_task.cancel()
-            try:
-                await feed_task
-            except asyncio.CancelledError:
-                pass
-        elif not feed_task.cancelled():
-            # 首块之后 feed 才失败：200 已提交无法改状态码，只能记日志(流会提前截断)
-            exc = feed_task.exception()
-            if exc:
-                logger.error("feed task failed after stream start (engine=%s voice=%s): %s",
-                             engine, voice, exc, exc_info=(type(exc), exc, exc.__traceback__))
-        await _reap_proc(proc)
+        if cleanup_claim is None or cleanup_claim.claim():
+            await _await_cleanup(
+                _finalize_mp3_session(proc, feed_task, engine, voice)
+            )
+
+
+class _Mp3StreamingResponse(StreamingResponse):
+    """持有预检 session，覆盖响应头发送前生成器尚未启动的取消窗口。"""
+
+    def __init__(self, proc, feed_task, engine, voice, **kwargs):
+        self._proc = proc
+        self._feed_task = feed_task
+        self._cleanup_claim = _Mp3CleanupClaim()
+        super().__init__(
+            _stream_mp3(
+                proc,
+                feed_task,
+                engine,
+                voice,
+                cleanup_claim=self._cleanup_claim,
+            ),
+            **kwargs,
+        )
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if self._cleanup_claim.claim():
+                await _await_cleanup(
+                    _dispose_mp3_session(self._proc, self._feed_task)
+                )
 
 
 @app.post("/api/tts")
@@ -807,7 +1193,9 @@ async def api_tts(req: TTSRequest, request: Request, download: bool = False):
         raise HTTPException(status_code=400, detail="text is empty after cleaning", headers={"X-Request-ID": request_id})
     # 预检：在提交 200 前确认真正产出音频；失败在此抛 HTTPException(正确错误码)。
     try:
-        proc, feed_task = await _start_synthesis(cleaned, req.engine, req.voice, req.speed, request_id)
+        proc, feed_task = await _start_synthesis_for_request(
+            request, cleaned, req.engine, req.voice, req.speed, request_id
+        )
     except HTTPException as exc:
         logger.warning("REST request failed request_id=%s engine=%s voice=%s status=%s detail=%s",
                        request_id, req.engine, req.voice, exc.status_code, exc.detail)
@@ -817,18 +1205,16 @@ async def api_tts(req: TTSRequest, request: Request, download: bool = False):
     # 不把资源回收责任外包给框架驱动行为，此处自兜底：构造响应失败即就地回收 proc/feed_task。
     try:
         disposition = "attachment; filename=tts-output.mp3" if download else "inline"
-        return StreamingResponse(
-            _stream_mp3(proc, feed_task, req.engine, req.voice),
+        return _Mp3StreamingResponse(
+            proc,
+            feed_task,
+            req.engine,
+            req.voice,
             media_type="audio/mpeg",
             headers={"Content-Disposition": disposition, "X-Request-ID": request_id},
         )
     except BaseException:
-        if not feed_task.done():
-            feed_task.cancel()
-        elif not feed_task.cancelled():
-            # 同族竞态：feed_task 已 done 带异常时取出，避免 GC "never retrieved" 告警
-            feed_task.exception()
-        await _reap_proc(proc)
+        await _await_cleanup(_dispose_mp3_session(proc, feed_task))
         raise
 
 
@@ -858,22 +1244,23 @@ async def api_voice_preview(
         raise HTTPException(status_code=422, detail="unknown Kokoro voice", headers={"X-Request-ID": request_id})
     text = _preview_text(engine, voice)
     try:
-        proc, feed_task = await _start_synthesis(text, engine, voice, speed, request_id)
+        proc, feed_task = await _start_synthesis_for_request(
+            request, text, engine, voice, speed, request_id
+        )
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), "X-Request-ID": request_id}
         raise
     try:
-        return StreamingResponse(
-            _stream_mp3(proc, feed_task, engine, voice),
+        return _Mp3StreamingResponse(
+            proc,
+            feed_task,
+            engine,
+            voice,
             media_type="audio/mpeg",
             headers={"Content-Disposition": "inline", "X-Request-ID": request_id},
         )
     except BaseException:
-        if not feed_task.done():
-            feed_task.cancel()
-        elif not feed_task.cancelled():
-            feed_task.exception()
-        await _reap_proc(proc)
+        await _await_cleanup(_dispose_mp3_session(proc, feed_task))
         raise
 
 
@@ -899,11 +1286,10 @@ async def synth_kokoro(units, voice, speed, queue, ws, cancel_event):
             await queue.put(pcm[i:i + 2048])
 
 
-async def synth_edge(text, voice, speed, queue, ws, cancel_event):
+async def synth_edge(text, voice, speed, queue, ws, cancel_event, prefetch: bool = False):
     rate = f"{int((speed - 1) * 100):+d}%"
-    communicate = edge_tts.Communicate(text, voice, rate=rate)
 
-    process = await _create_edge_pcm_decoder()
+    process = await _create_edge_pcm_decoder(prefetch=prefetch)
     # Edge 整段连续流式，无法逐句切分音频边界，故整段发一个句边界标记(run 级粒度)。
     # 前端据此建时间线；变速时 Edge 段按整段重合成(云端成本高，run 级是自然单元)。
     await queue.put({"type": "seg", "text": text})
@@ -911,12 +1297,11 @@ async def synth_edge(text, voice, speed, queue, ws, cancel_event):
     async def feed():
         # 无论是否异常，stdin 必须关闭，否则 ffmpeg 不 EOF，read() 永久阻塞
         try:
-            async for chunk in communicate.stream():
+            async for data in _iter_edge_audio(text, voice, rate, cancel_event):
                 if ws.client_state == WebSocketState.DISCONNECTED or cancel_event.is_set():
                     break
-                if chunk["type"] == "audio":
-                    process.stdin.write(chunk["data"])
-                    await process.stdin.drain()
+                process.stdin.write(data)
+                await process.stdin.drain()
         finally:
             try:
                 process.stdin.close()
@@ -939,16 +1324,35 @@ async def synth_edge(text, voice, speed, queue, ws, cancel_event):
                 await queue.put(data[:even])
             leftover = data[even:]
 
-    # return_exceptions=True：一方异常不会让另一方变成孤儿 task
+    # feed/read 中任一 await 都可能长期阻塞，循环边界轮询 cancel_event 无法及时中止。
+    # 用独立哨兵竞速整个 I/O 组合；取消胜出时主动取消两侧任务，feed 的 finally
+    # 会关闭 stdin，随后统一回收 decoder。
+    work = asyncio.gather(feed(), read(), return_exceptions=True)
+    cancel_wait = asyncio.create_task(cancel_event.wait())
     try:
-        results = await asyncio.gather(feed(), read(), return_exceptions=True)
+        done, _ = await asyncio.wait(
+            {work, cancel_wait},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cancel_wait in done:
+            return
+
+        results = work.result()
         for r in results:
             if isinstance(r, Exception) and not isinstance(r, asyncio.CancelledError):
                 logger.error("synth_edge task failed: %s", r, exc_info=(type(r), r, r.__traceback__))
                 raise r
     finally:
-        # 无论正常/异常，都确保 ffmpeg 子进程被回收，避免僵尸进程
-        await _reap_edge_pcm_decoder(process)
+        cancel_wait.cancel()
+        if not work.done():
+            work.cancel()
+        try:
+            await _await_cleanup(
+                asyncio.gather(work, cancel_wait, return_exceptions=True)
+            )
+        finally:
+            # work 清理本身被取消时也必须进入 decoder 回收，避免泄漏进程配额。
+            await _reap_edge_pcm_decoder(process, prefetch=prefetch)
 
 
 # =========================
@@ -957,6 +1361,7 @@ async def synth_edge(text, voice, speed, queue, ws, cancel_event):
 @app.websocket("/ws/tts")
 async def ws_tts(ws: WebSocket):
     sender_task = None
+    is_prefetch = ws.query_params.get("prefetch") == "1"
     # WS 握手不经 HTTP 鉴权中间件，此处单独校验。同源自有页面(index.html)用 Origin 免密；
     # 外部客户端(如 CRX)浏览器无法为 WS 设自定义头，改用 ?key= 查询参数。未配置密钥 = 完全开放。
     # 校验失败以 1008(Policy Violation)在 accept 前拒绝握手。
@@ -1035,7 +1440,10 @@ async def ws_tts(ws: WebSocket):
                         units = [u for u in text.split("\n") if u.strip()]
                         await synth_kokoro(units, voice, speed, queue, ws, cancel_event)
                     else:
-                        await synth_edge(text, voice, speed, queue, ws, cancel_event)
+                        await synth_edge(
+                            text, voice, speed, queue, ws, cancel_event,
+                            prefetch=is_prefetch,
+                        )
 
                 if TTS_SYNTHESIS_TIMEOUT_SECONDS:
                     try:

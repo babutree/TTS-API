@@ -70,11 +70,12 @@ fetch("https://tts.example.com/api/tts", {
         <h2 id="health"><span class="method">GET</span><span class="path">/</span></h2>
         <p data-i18n-html="healthDesc">Health check. Returns the engine and <code>ffmpeg</code> readiness status.</p>
         <h3 data-i18n="healthResp200">Response 200 — engine ready</h3>
-        <pre><code>{ "status": "v0.1 engine running", "ready": true }</code></pre>
+        <pre><code>{ "status": "v0.11 engine running", "ready": true, "max_text_length": 100000 }</code></pre>
+        <p data-i18n-html="healthMaxTextNote"><code>max_text_length</code> mirrors <code>MAX_TEXT_LENGTH</code> (present on 200 and 503) so the UI can highlight overflow and speak only the in-limit portion.</p>
         <h3 data-i18n="healthResp503">Response 503 — engine starting</h3>
-        <pre><code>{ "status": "starting", "ready": false }</code></pre>
+        <pre><code>{ "status": "starting", "ready": false, "max_text_length": 100000 }</code></pre>
         <h3 data-i18n="healthRespFfmpeg">Response 503 — ffmpeg missing</h3>
-        <pre><code>{ "status": "ffmpeg missing", "ready": false }</code></pre>
+        <pre><code>{ "status": "ffmpeg missing", "ready": false, "max_text_length": 100000 }</code></pre>
         <div class="tester">
             <div><button class="btn" onclick="testHealth()" data-i18n="btnSend">Send request</button></div>
             <div class="out" id="outHealth"></div>
@@ -291,6 +292,7 @@ const I18N = {
         btnSave: "Save", btnClear: "Clear", btnShowHide: "Show/Hide", btnVerify: "Verify key",
         btnSend: "Send request", btnSendPlay: "Send request and play", btnWsConnect: "Connect, synthesize and play",
         healthDesc: "Health check. Returns the engine and <code>ffmpeg</code> readiness status.",
+        healthMaxTextNote: "<code>max_text_length</code> mirrors <code>MAX_TEXT_LENGTH</code> (present on 200 and 503) so the UI can highlight overflow and speak only the in-limit portion.",
         healthResp200: "Response 200 — engine ready",
         healthResp503: "Response 503 — engine starting",
         healthRespFfmpeg: "Response 503 — ffmpeg missing",
@@ -394,6 +396,7 @@ const I18N = {
         btnSave: "保存", btnClear: "清除", btnShowHide: "显示/隐藏", btnVerify: "校验密钥",
         btnSend: "发送请求", btnSendPlay: "发送请求并播放", btnWsConnect: "连接并合成播放",
         healthDesc: "健康检查，返回引擎与 <code>ffmpeg</code> 就绪状态。",
+        healthMaxTextNote: "<code>max_text_length</code> 与 <code>MAX_TEXT_LENGTH</code> 一致（200/503 均返回），供 UI 高亮超限段并只朗读未超出部分。",
         healthResp200: "响应 200 — 引擎就绪",
         healthResp503: "响应 503 — 引擎启动中",
         healthRespFfmpeg: "响应 503 — ffmpeg 缺失",

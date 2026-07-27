@@ -49,7 +49,10 @@ class HttpApiTests(unittest.TestCase):
         resp = self.client.get("/")
 
         self.assertEqual(resp.status_code, 503)
-        self.assertEqual(resp.json(), {"status": "starting", "ready": False})
+        body = resp.json()
+        self.assertEqual(body["status"], "starting")
+        self.assertFalse(body["ready"])
+        self.assertEqual(body["max_text_length"], self.app.MAX_TEXT_LENGTH)
 
     def test_health_returns_200_when_ready(self):
         self._mark_ready()
@@ -57,7 +60,10 @@ class HttpApiTests(unittest.TestCase):
         resp = self.client.get("/")
 
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {"status": "v0.1 engine running", "ready": True})
+        body = resp.json()
+        self.assertEqual(body["status"], "v0.11 engine running")
+        self.assertTrue(body["ready"])
+        self.assertEqual(body["max_text_length"], self.app.MAX_TEXT_LENGTH)
 
     def test_health_returns_503_when_ffmpeg_missing(self):
         self._mark_ready()
@@ -69,6 +75,7 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 503)
         self.assertEqual(resp.json()["status"], "ffmpeg missing")
         self.assertFalse(resp.json()["ready"])
+        self.assertEqual(resp.json()["max_text_length"], self.app.MAX_TEXT_LENGTH)
 
     def test_health_reports_ready_when_ffmpeg_available(self):
         self._mark_ready()
@@ -77,7 +84,10 @@ class HttpApiTests(unittest.TestCase):
         resp = self.client.get("/")
 
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {"status": "v0.1 engine running", "ready": True})
+        body = resp.json()
+        self.assertEqual(body["status"], "v0.11 engine running")
+        self.assertTrue(body["ready"])
+        self.assertEqual(body["max_text_length"], self.app.MAX_TEXT_LENGTH)
 
     def test_static_html_responses_declare_utf8_charset(self):
         for path in ("/index.html", "/api"):

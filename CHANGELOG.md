@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1 - Unreleased
+## v0.11 - Unreleased
 
 ### Added
 
@@ -14,6 +14,7 @@
 
 ### Changed
 
+- The main UI now pipelines cross-engine and cross-voice runs through a two-slot prefetch window, preserving PCM/timeline order and using a bounded fallback when the current prefetched run stalls.
 - Unified the synthesis speed/engine bounds into shared constants (`SPEED_MIN`/`SPEED_MAX`/`VALID_ENGINES`) across the REST model, WebSocket parser, and voice-preview query, removing the duplicated `0.5`/`3.0`/`("kokoro","edge")` literals. REST still rejects out-of-range speed with `422`; WebSocket still clamps (each keeps its protocol semantics).
 - Widened cross-language stripping and speakable-content detection to cover CJK extension A, compatibility ideographs, and the supplementary planes, not just the basic block.
 - Documented that a `POST /api/tts` stream can end truncated/empty after the `200` is committed if transcoding fails mid-stream.
@@ -25,6 +26,7 @@
 
 ### Fixed
 
+- Kept speculative Edge prefetch below normal REST/WebSocket priority by reserving decoder capacity and waiting for main-request decoder admission before opening the Edge prefetch window.
 - Prevented WebSocket synthesis failures from emitting a false `end` message.
 - Fixed the main UI so later synthesis segments that disconnect before `end` are shown as errors instead of completed playback.
 - Applied the `ffmpeg` process limit to WebSocket Edge synthesis and documented that voice previews are API-key protected.

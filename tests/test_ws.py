@@ -172,6 +172,27 @@ class WsRequestValidationTests(unittest.TestCase):
 
 
 class WsSynthesisFlowTests(unittest.TestCase):
+    def test_prefetch_query_marks_edge_synthesis_low_priority(self):
+        app = _load(key="")
+        prefetch_flags = []
+
+        async def fake_synth_edge(text, voice, speed, queue, ws, cancel_event, prefetch=False):
+            prefetch_flags.append(prefetch)
+            await queue.put({"type": "seg", "text": text})
+
+        app.synth_edge = fake_synth_edge
+        client = TestClient(app.app)
+        with client.websocket_connect("/ws/tts?prefetch=1") as ws:
+            ws.send_json({"text": "first", "engine": "edge", "voice": "edge-voice"})
+            _, first_terminal = _collect_until_terminal(ws)
+        with client.websocket_connect("/ws/tts") as ws:
+            ws.send_json({"text": "second", "engine": "edge", "voice": "edge-voice"})
+            _, second_terminal = _collect_until_terminal(ws)
+
+        self.assertEqual(first_terminal, "end")
+        self.assertEqual(second_terminal, "end")
+        self.assertEqual(prefetch_flags, [True, False])
+
     def test_happy_path_emits_start_seg_audio_end(self):
         app = _load(key="")
         _install_kokoro_pcm(app, b"\x01\x02\x03\x04")

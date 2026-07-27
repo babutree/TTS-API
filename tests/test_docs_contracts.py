@@ -109,6 +109,97 @@ class ApiReferenceContractTests(unittest.TestCase):
         self.assertIn("Markdown 安全输入", zh)
         self.assertIn("语言自动路由", zh)
 
+    def test_readmes_align_quick_deploy_and_ai_install_contracts(self):
+        """安装章节须双语对齐，并锁住真实命令和安全边界。"""
+        en = (ROOT / "README.md").read_text(encoding="utf-8")
+        zh = (ROOT / "README_CN.md").read_text(encoding="utf-8")
+
+        # 价值主张必须先于安装说明：读者先知道这是什么，再被要求 clone。
+        self.assertLess(en.index("## Why this project"), en.index("## Quick Start"))
+        self.assertLess(zh.index("## 为什么选它"), zh.index("## 快速开始"))
+
+        # 安装说明集中在单一章节内，不再散落成两处重复的部署流程。
+        en_start = en.index("## Quick Start")
+        zh_start = zh.index("## 快速开始")
+        en_end = en.index("## API", en_start)
+        zh_end = zh.index("## API 文档", zh_start)
+        self.assertLess(en_start, en_end)
+        self.assertLess(zh_start, zh_end)
+
+        en_section = en[en_start:en_end]
+        zh_section = zh[zh_start:zh_end]
+        self.assertIn("### Docker (recommended)", en_section)
+        self.assertIn("### Local", en_section)
+        self.assertIn("### Let an AI install it for you", en_section)
+        self.assertIn("### Docker（推荐）", zh_section)
+        self.assertIn("### 本地运行", zh_section)
+        self.assertIn("### 让 AI 帮你装", zh_section)
+
+        shared_facts = (
+            "git clone https://github.com/babutree/TTS-API.git",
+            "docker compose config --quiet",
+            "docker compose up --build -d",
+            "docker compose ps",
+            "docker compose logs --tail=100 tts-api",
+            "http://localhost:8880/",
+            "http://localhost:8880/index.html",
+            "ready: true",
+            "TTS_API_KEY",
+            "TTS_CORS_ALLOW_ORIGINS",
+            "8880:8880",
+            "Python 3.10+",
+            "ffmpeg",
+            "espeak-ng",
+            "docker compose down -v",
+        )
+        for fact in shared_facts:
+            self.assertIn(fact, en_section, f"README.md missing deployment fact: {fact}")
+            self.assertIn(fact, zh_section, f"README_CN.md missing deployment fact: {fact}")
+
+        for item in range(1, 8):
+            self.assertRegex(en_section, rf"(?m)^{item}\. ")
+            self.assertRegex(zh_section, rf"(?m)^{item}\. ")
+
+        self.assertIn("15 minutes", en_section)
+        self.assertIn("15 分钟", zh_section)
+        self.assertIn("all host interfaces", en_section)
+        self.assertIn("所有主机接口", zh_section)
+        self.assertIn("Do not run `docker compose down -v`", en_section)
+        self.assertIn("不得运行 `docker compose down -v`", zh_section)
+        self.assertNotIn("docker compose pull", en)
+        self.assertNotIn("docker compose pull", zh)
+
+    def test_reliability_timeout_docs_match_runtime_and_compose(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        index_source = (ROOT / "index.html").read_text(encoding="utf-8")
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        api_doc = (ROOT / "API.md").read_text(encoding="utf-8")
+        en = (ROOT / "README.md").read_text(encoding="utf-8")
+        zh = (ROOT / "README_CN.md").read_text(encoding="utf-8")
+
+        name = "EDGE_VOICES_REQUEST_TIMEOUT_SECONDS"
+        for label, text in (
+            ("app.py", app_source),
+            ("docker-compose.yml", compose),
+            ("API.md", api_doc),
+            ("README.md", en),
+            ("README_CN.md", zh),
+        ):
+            self.assertIn(name, text, f"{label} missing {name}")
+
+        self.assertRegex(
+            app_source,
+            r"DEFAULT_EDGE_VOICES_REQUEST_TIMEOUT_SECONDS\s*=\s*5\.0",
+        )
+        self.assertIn("EDGE_VOICES_REQUEST_TIMEOUT_SECONDS=5", compose)
+        self.assertIn("per attempt", api_doc.lower())
+        self.assertIn("per attempt", en.lower())
+        self.assertIn("每次尝试", zh)
+
+        self.assertRegex(index_source, r"WS_INACTIVITY_TIMEOUT_MS\s*=\s*60000")
+        self.assertIn("60 seconds", en.lower())
+        self.assertIn("60 秒", zh)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -72,23 +72,22 @@
 
             <!-- 左栏：文本输入(占 2/3) -->
             <div class="lg:col-span-2 flex flex-col gap-2">
-                <div class="flex items-center justify-between">
+                <div class="flex items-center justify-between gap-2">
                     <label class="text-xs font-medium text-slate-500 dark:text-slate-300 uppercase tracking-wide" data-i18n="textLabel">文本内容</label>
-                    <span id="charCount" class="text-xs text-slate-400 dark:text-slate-400 tabular-nums">0 字</span>
+                    <span id="charCount" class="text-xs text-slate-400 dark:text-slate-400 tabular-nums shrink-0">0 字</span>
                 </div>
-                <textarea id="t" data-i18n-ph="placeholder"
-                    class="w-full flex-1 min-h-[200px] sm:min-h-[340px] rounded-xl border border-slate-300 dark:border-white/15 bg-white/60 dark:bg-white/5 p-4 text-base sm:text-sm leading-relaxed text-slate-800 dark:text-slate-100 outline-none resize-none placeholder:text-slate-400 dark:placeholder:text-slate-500"
-                    placeholder="在这里粘贴想要朗读的文字，长文也可以…"># TTS-API 开箱试听
-
-这是一个**流式**文字转语音服务：本机 Kokoro 可离线合成，微软 Edge 提供在线音色，也支持可编程 API。
-
-- 粘贴 Markdown 也可以——标题、列表、**粗体**、行内代码会在朗读前自动清理
-- Auto 模式按句识别中英文，无缝切换对应音色
-- 需要集成？REST `POST /api/tts` 返回 MP3，WebSocket 推送 PCM
-
-Hello — paste **Markdown**, click Read, and stream speech in real time.
-Need an API? Call `POST /api/tts` for MP3, or open the [docs](/api) live tester.
-Docker one-liner gets you a ready UI plus dual engines.</textarea>
+                <!-- 双层输入：底层高亮从 max_text_length 起的超限段；上层 textarea 透明字+可见光标，滚动同步 -->
+                <div id="textShell" class="text-input-shell relative flex-1 min-h-[200px] sm:min-h-[340px] rounded-xl border border-slate-300 dark:border-white/15 bg-white/60 dark:bg-white/5 overflow-hidden">
+                    <div id="textHighlight" class="text-highlight text-base sm:text-sm leading-relaxed" aria-hidden="true"></div>
+                    <textarea id="t" data-i18n-ph="placeholder"
+                        class="text-input-area w-full h-full min-h-[200px] sm:min-h-[340px] p-4 text-base sm:text-sm leading-relaxed outline-none resize-none bg-transparent"
+                        placeholder="在这里粘贴想要朗读的文字，长文也可以…">你好，这是一个把文字变成**自然语音**的小工具。Hello, this is a handy tool for converting text into speech.
+直接点击下面的「朗读」按钮，就能听到这段示例。Simply click **Read** below to hear this sample spoken.
+你也可以换成自己的文字，再选音色和语速。You can also replace this with your own text and pick a voice and speed.
+试试 Auto：中文和英文会按句分开朗读。Try **Auto** — Chinese and English are spoken with matching voices.
+粘贴 `Markdown` 也可以，标题和列表不会被读出来。Enjoy the seamless experience!</textarea>
+                </div>
+                <p id="textLimitHint" class="hidden text-[11px] text-rose-600 dark:text-rose-400 leading-relaxed"></p>
             </div>
 
             <!-- 右栏：设置(占 1/3) -->
@@ -238,6 +237,8 @@ const I18N = {
         stopTitle: "停止",
         placeholder: "在这里粘贴想要朗读的文字，长文也可以…",
         charUnit: "字",
+        charOver: (n, limit, excess) => `${n} / ${limit} 字 · 超出 ${excess}`,
+        limitHint: (limit) => `内容已超过最大长度（${limit} 字），仅朗读前 ${limit} 字；如需放宽请联系管理员调整。`,
         st_idle: "待机", st_connecting: "连接中", st_streaming: "合成中",
         st_playing: "播放中", st_paused: "已暂停", st_done: "完成", st_error: "出错",
         vf: "女声", vm: "男声",
@@ -272,6 +273,8 @@ const I18N = {
         stopTitle: "Stop",
         placeholder: "Paste the text you want read aloud, long text is fine…",
         charUnit: "chars",
+        charOver: (n, limit, excess) => `${n} / ${limit} chars · ${excess} over`,
+        limitHint: (limit) => `Text exceeds the configured max length (${limit} chars); only the in-limit portion will be spoken. Contact your administrator to raise it.`,
         st_idle: "Idle", st_connecting: "Connecting", st_streaming: "Synthesizing",
         st_playing: "Playing", st_paused: "Paused", st_done: "Done", st_error: "Error",
         vf: "Female", vm: "Male",
@@ -359,6 +362,25 @@ function parseEdgeName(shortName) {
     return m ? m[1] : shortName;
 }
 
+// Edge 会同时返回 AvaNeural / AvaMultilingualNeural 等同角色变体，而当前 UI
+// 不展示变体能力。只折叠这种 ID 级变体族，避免按显示名误删跨 locale 的同名音色；
+// 两者并存时优先能力更广的 Multilingual，只有普通 Neural 时仍保留普通版。
+function dedupeEdgeVoiceVariants(list) {
+    const byVariantFamily = new Map();
+    for (const voice of list || []) {
+        const id = String(voice.value || "");
+        const familyId = id.replace(/Multilingual(?=Neural$)/i, "").toLowerCase();
+        const key = `${familyId}\u0000${voice.gender || ""}`;
+        const previous = byVariantFamily.get(key);
+        const isMultilingual = /MultilingualNeural$/i.test(id);
+        const previousIsMultilingual = previous && /MultilingualNeural$/i.test(String(previous.value || ""));
+        if (!previous || (!previousIsMultilingual && isMultilingual)) {
+            byVariantFamily.set(key, voice);
+        }
+    }
+    return [...byVariantFamily.values()];
+}
+
 // 拉取后端音色目录，映射为前端结构后刷新下拉。失败则保持空列表并提示，不静默伪装。
 // 统一模型 { value, gender(vf/vm), name(专名), region(CN/US/UK) }。
 async function loadVoices() {
@@ -370,16 +392,21 @@ async function loadVoices() {
         gender: toGenderKey(v.gender),
         name: v.name,
         region: v.language === "en" ? "US" : "CN",   // Kokoro 英文为美音、中文为普通话
+        locale: v.language === "en" ? "en-US" : "zh-CN",
     }));
-    voiceDatabase.edge = (data.edge || [])
+    voiceDatabase.edge = dedupeEdgeVoiceVariants((data.edge || [])
         .filter(v => EDGE_LOCALE_WHITELIST.includes(v.locale))
         .map(v => ({
             value: v.id,
             gender: toGenderKey(v.gender),
             name: parseEdgeName(v.id),
             region: LOCALE_SHORT[v.locale] || v.locale,
+            locale: v.locale || "",
             dialect: EDGE_DIALECT_TAG[v.locale] || "",   // 方言标注(i18n 键)：普通话为空，粤语/台湾/东北/陕西非空
-        }));
+        })));
+    // 语言族 → locale → 女→男 → 专名（不依赖微软返回序）
+    voiceDatabase.edge = sortVoices(voiceDatabase.edge);
+    voiceDatabase.kokoro = sortVoices(voiceDatabase.kokoro);
     updateVoices();
     voicesReady = true;
     voicesLoadError = false;
@@ -393,6 +420,31 @@ function voiceLabel(v) {
     const open = currentLang === "zh" ? "（" : "(";
     const close = currentLang === "zh" ? "）" : ")";
     return `${t(v.gender)} · ${v.name}${open}${t(v.dialect)}${close} · ${v.region}`;
+}
+
+// 下拉排序：语言族(中文→英文) → locale(普通话→方言→台湾→粤语；美音→英音) → 女声优先 → 专名。
+// 不依赖微软 list_voices 的原始顺序(常把 zh-HK 等插在前面、UK/US 与男女混排)。
+const EDGE_LOCALE_RANK = {
+    "zh-CN": 0, "zh-CN-liaoning": 1, "zh-CN-shaanxi": 2, "zh-TW": 3, "zh-HK": 4,
+    "en-US": 0, "en-GB": 1,
+};
+function languageFamilyRank(locale) {
+    const s = String(locale || "");
+    if (s.startsWith("zh")) return 0;
+    if (s.startsWith("en")) return 1;
+    return 50;
+}
+function sortVoices(list) {
+    return (list || []).slice().sort((a, b) => {
+        const fa = languageFamilyRank(a.locale);
+        const fb = languageFamilyRank(b.locale);
+        if (fa !== fb) return fa - fb;
+        const ra = EDGE_LOCALE_RANK[a.locale] ?? 50;
+        const rb = EDGE_LOCALE_RANK[b.locale] ?? 50;
+        if (ra !== rb) return ra - rb;
+        if (a.gender !== b.gender) return a.gender === "vf" ? -1 : 1;
+        return String(a.name || "").localeCompare(String(b.name || ""), "en");
+    });
 }
 
 // 音色 → 引擎：本地 Kokoro 前缀 zf_/zm_/af_/am_，其余为 Edge 在线
@@ -454,6 +506,13 @@ function defaultKokoroVoice(isZh) {
     return v ? v.value : null;
 }
 
+// 合成用文本：超限时截到 maxTextLength，仅播放未超出部分(输入框全文保留，高亮示超限起点)。
+// 前端体验：不阻断朗读；后端 REST/WS 仍按单次请求校验 MAX_TEXT_LENGTH。
+function textForSynthesis() {
+    const raw = textArea.value;
+    return raw.length > maxTextLength ? raw.slice(0, maxTextLength) : raw;
+}
+
 // 把整篇文本解析为句级列表，每句标注目标 (engine, voice)。单一事实源。
 // 铁律：Kokoro 每个 pipeline 单语言，中文/英文文本必须各走对应语言音色，否则读错(连 DNS 都错)。
 // - Auto：按句切→按语言切子片段，中文段用中文音色、英文段用英文音色。
@@ -462,7 +521,7 @@ function defaultKokoroVoice(isZh) {
 // 返回 [{ engine, voice, text }]
 function computeSentences() {
     const engineSel = document.getElementById("engine").value;
-    const sentences = splitSentences(textArea.value);
+    const sentences = splitSentences(textForSynthesis());
 
     if (engineSel === "edge") {
         // Edge 原生多语言，整段交给选中音色，不按语言拆分
@@ -578,6 +637,10 @@ function cancelPreview() {
 }
 
 async function previewVoice() {
+    // 主朗读进行中点试听：先停主播，再试听，避免两路声音重叠。
+    if (isPlaying || isPaused || (ws && ws.readyState === WebSocket.OPEN)) {
+        stop();
+    }
     if (!voicesReady) {
         try {
             voicesPromise = voicesPromise || loadVoices();
@@ -617,6 +680,31 @@ async function previewVoice() {
     }
 }
 
+// en-US-Ana 是女童声，不适合做默认；Ava 等成年女声可作默认。
+// Ana 仍保留在列表中可手动选择，只是不作为 Auto 英文默认。
+function isChildishEnglishVoice(id) {
+    return /^en-US-Ana/i.test(String(id || ""));
+}
+
+function isPreferredAvaEnglishVoice(id) {
+    return /^en-US-Ava(?:Multilingual)?Neural$/i.test(String(id || ""));
+}
+
+// 重建下拉后恢复选中：优先保留旧值；否则用 prefer(value) 挑默认；再否则首项。
+function restoreSelectValue(sel, oldValue, prefer) {
+    const opts = [...sel.options];
+    if (oldValue && opts.some(o => o.value === oldValue)) {
+        sel.value = oldValue;
+        return;
+    }
+    const preferences = Array.isArray(prefer) ? prefer : [prefer];
+    for (const predicate of preferences) {
+        if (typeof predicate !== "function") continue;
+        const hit = opts.find(o => predicate(o.value));
+        if (hit) { sel.value = hit.value; return; }
+    }
+}
+
 function updateVoices() {
     const engine = document.getElementById("engine").value;
     const voiceSingle = document.getElementById("voiceSingle");
@@ -626,7 +714,7 @@ function updateVoices() {
     voiceAuto.classList.toggle("hidden", engine !== "auto");
 
     if (engine === "auto") {
-        // 中文音色 / 英文音色 各汇总两引擎的对应语言音色，Edge 在线在前(默认选中,发音更自然)
+        // 中文音色 / 英文音色 各汇总两引擎的对应语言音色，Edge 在线在前
         const mixedSel = document.getElementById("voiceZh");
         const enSel = document.getElementById("voiceEnAuto");
         const oldZh = mixedSel.value;
@@ -640,11 +728,14 @@ function updateVoices() {
             opt.textContent = `${voiceLabel(v)} · ${tag}`;
             sel.appendChild(opt);
         };
-        // Edge 在线优先(默认选中项 = 列表首项 = 在线,发音更标准自然)
+        // Edge 在线优先；不改排序，空/失效选择时显式优先成年 Ava，再避开女童 Ana。
         voiceDatabase.edge.forEach(v => addOpt(isZhVoice(v) ? mixedSel : enSel, v, t("tagOnline")));
         voiceDatabase.kokoro.forEach(v => addOpt(isZhVoice(v) ? mixedSel : enSel, v, t("tagLocal")));
-        if ([...mixedSel.options].some(o => o.value === oldZh)) mixedSel.value = oldZh;
-        if ([...enSel.options].some(o => o.value === oldEn)) enSel.value = oldEn;
+        restoreSelectValue(mixedSel, oldZh);
+        restoreSelectValue(enSel, oldEn, [
+            isPreferredAvaEnglishVoice,
+            (id) => !isChildishEnglishVoice(id),
+        ]);
     } else {
         const sel = document.getElementById("voice");
         const old = sel.value;
@@ -655,7 +746,8 @@ function updateVoices() {
             opt.textContent = voiceLabel(v);
             sel.appendChild(opt);
         });
-        if ([...sel.options].some(o => o.value === old)) sel.value = old;
+        // 单引擎仍保持现有排序的首项规则；只恢复用户已有选择。
+        restoreSelectValue(sel, old);
     }
 }
 updateVoices();
@@ -683,6 +775,8 @@ document.getElementById("speedGroup").addEventListener("click", (e) => {
 // 变速续播(Bug5-A)：定位当前播放头所在句 → 截断 buffer 到该句起点(保留已播句以支持
 // 后退) → 从该句起用新速度重建 run 队列并续播。无法在句中切速度(音频已固化),故按句粒度。
 function restartFromCurrentSentence() {
+    clearMainInactivityTimer();
+    abortAllPrefetch();
     const headSample = Math.round(getHead() * SAMPLE_RATE);
     // timeline 按 startSample 递增；找到起点 <= 播放头的最后一句
     let k = 0;
@@ -718,13 +812,95 @@ function restartFromCurrentSentence() {
     sendRequest();
 }
 
-// 字数统计
+// 字数统计 + 超限高亮：上限与后端 MAX_TEXT_LENGTH 对齐(GET / 下发 max_text_length)。
+// 体验策略：不阻断朗读；高亮超限段 + 提示「建议改配置」；合成仅取前 maxTextLength 字。
 const textArea = document.getElementById("t");
 const charCount = document.getElementById("charCount");
-function updateCharCount() {
-    charCount.textContent = `${textArea.value.length} ${t("charUnit")}`;
+const textHighlight = document.getElementById("textHighlight");
+const textLimitHint = document.getElementById("textLimitHint");
+const textShell = document.getElementById("textShell");
+// 与 app.DEFAULT_MAX_TEXT_LENGTH 同默认；health 成功后覆盖为运行时配置
+let maxTextLength = 100000;
+
+function escapeHtml(s) {
+    return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
 }
+
+function isTextOverLimit() {
+    return textArea.value.length > maxTextLength;
+}
+
+function syncTextHighlightScroll() {
+    if (textHighlight) textHighlight.scrollTop = textArea.scrollTop;
+    if (textHighlight) textHighlight.scrollLeft = textArea.scrollLeft;
+}
+
+function updateTextHighlight() {
+    if (!textHighlight) return;
+    const raw = textArea.value;
+    const limit = maxTextLength;
+    if (raw.length <= limit) {
+        textHighlight.innerHTML = escapeHtml(raw);
+    } else {
+        // 从第 limit+1 字起标红底：可见「从哪里开始超出」
+        textHighlight.innerHTML =
+            escapeHtml(raw.slice(0, limit)) +
+            '<mark class="text-over">' + escapeHtml(raw.slice(limit)) + "</mark>";
+    }
+    syncTextHighlightScroll();
+}
+
+function updateCharCount() {
+    const n = textArea.value.length;
+    const limit = maxTextLength;
+    const over = n > limit;
+    if (over) {
+        const excess = n - limit;
+        const fmt = I18N[currentLang].charOver;
+        charCount.textContent = typeof fmt === "function" ? fmt(n, limit, excess) : `${n}/${limit}`;
+        charCount.classList.add("text-rose-600", "dark:text-rose-400");
+        charCount.classList.remove("text-slate-400", "dark:text-slate-400");
+    } else {
+        charCount.textContent = `${n} ${t("charUnit")}`;
+        charCount.classList.remove("text-rose-600", "dark:text-rose-400");
+        charCount.classList.add("text-slate-400", "dark:text-slate-400");
+    }
+    if (textShell) textShell.classList.toggle("text-over-limit", over);
+    if (textLimitHint) {
+        if (over) {
+            const fmt = I18N[currentLang].limitHint;
+            textLimitHint.textContent = typeof fmt === "function"
+                ? fmt(limit)
+                : `over ${limit}`;
+            textLimitHint.classList.remove("hidden");
+        } else {
+            textLimitHint.textContent = "";
+            textLimitHint.classList.add("hidden");
+        }
+    }
+    updateTextHighlight();
+}
+
+async function loadTextLimit() {
+    try {
+        const resp = await fetch("/");
+        const data = await resp.json();
+        const n = data && data.max_text_length;
+        if (typeof n === "number" && Number.isFinite(n) && n > 0) {
+            maxTextLength = Math.floor(n);
+        }
+    } catch (_) {
+        // 拉取失败保留默认 100000，与后端 DEFAULT 一致；不静默取消限长
+    }
+    updateCharCount();
+}
+
 textArea.addEventListener("input", updateCharCount);
+textArea.addEventListener("scroll", syncTextHighlightScroll);
 updateCharCount();
 
 // 示例文案作为真实 value(未编辑直接点朗读即播放示例)；用户首次聚焦时清空一次,
@@ -804,9 +980,22 @@ let lastEnd = 0;           // 上一段音频实际结束的时间轴位置(秒)
 
 // 句级事实源：computeSentences() 产出，[{ engine, voice, text }]。变速续播的定位基准
 let allSentences = [];
-// 运行段队列(段级流式)：buildRunsFrom() 产出，逐段串行发送(收到 {end} 才发下一段)
+// 运行段队列(段级流式)：buildRunsFrom() 产出。
+// 同引擎/音色：主 WS 等 {end} 再发(后端合成期任意入站消息会 cancel 当前合成)。
+// 跨引擎/音色(中英 Auto)：另开 WS 预取后续段 PCM（最多两槽），当前段播完即拼接。
 let runQueue = [];
 let runIndex = 0;
+const PREFETCH_AHEAD = 2;
+const PREFETCH_WAIT_GRACE_MS = 1500;
+const WS_INACTIVITY_TIMEOUT_MS = 60000;
+const prefetchMap = new Map(); // runIndex → { ws, runIndex, chunks, ended, error, sampleCount, segOffsets }
+const prefetchWaitTimers = new WeakMap(); // state → 当前成为消费阻塞点后启动的 deadline timer
+const prefetchInactivityTimers = new WeakMap(); // state → 最近一次有效 WS 活动后的静默 deadline
+const prefetchCommitMeta = new WeakMap(); // state → current promotion 的 base/已提交音频与 seg 进度
+let prefetchTerminalHandler = null;
+let prefetchProgressHandler = null;
+let mainInactivityTimer = null;
+let mainInactivitySocket = null;
 // 句级时间线：每句音频在 buffer 中的起始样本 + 句下标。用于变速时按句定位、续播
 // timeline[i] = { startSample, sentenceIndex }
 let timeline = [];
@@ -940,7 +1129,7 @@ function startPlayback(fromSec, lead) {
     pump();
 }
 
-// 发送当前 run：runQueue[runIndex]。收到该 run 的 {end} 后由 onmessage 触发下一 run。
+// 发送当前 run：runQueue[runIndex]（主 WS）。
 function sendCurrentRun(markRunPending) {
     const run = runQueue[runIndex];
     if (!run) return;
@@ -953,15 +1142,356 @@ function sendCurrentRun(markRunPending) {
     }));
 }
 
-// 发起合成：开新 WS，连接后逐段串行发送 runQueue
+function clearPrefetchWaitTimer(state) {
+    const waitTimer = prefetchWaitTimers.get(state);
+    if (waitTimer !== undefined) {
+        clearTimeout(waitTimer);
+        prefetchWaitTimers.delete(state);
+    }
+}
+
+function clearPrefetchInactivityTimer(state) {
+    const timer = prefetchInactivityTimers.get(state);
+    if (timer !== undefined) {
+        clearTimeout(timer);
+        prefetchInactivityTimers.delete(state);
+    }
+}
+
+function clearMainInactivityTimer(socket = null) {
+    if (socket && mainInactivitySocket !== socket) return;
+    if (mainInactivityTimer !== null) clearTimeout(mainInactivityTimer);
+    mainInactivityTimer = null;
+    mainInactivitySocket = null;
+}
+
+function closePrefetchState(state) {
+    if (!state) return;
+    clearPrefetchWaitTimer(state);
+    clearPrefetchInactivityTimer(state);
+    prefetchCommitMeta.delete(state);
+    const sock = state.ws;
+    if (sock) {
+        try { sock.onopen = sock.onmessage = sock.onerror = sock.onclose = null; } catch (_) {}
+        try { sock.close(); } catch (_) {}
+    }
+}
+
+function abortPrefetch(targetRunIndex) {
+    const state = prefetchMap.get(targetRunIndex);
+    if (!state) return;
+    prefetchMap.delete(targetRunIndex);
+    closePrefetchState(state);
+}
+
+function abortAllPrefetch() {
+    const states = Array.from(prefetchMap.values());
+    prefetchMap.clear();
+    prefetchTerminalHandler = null;
+    prefetchProgressHandler = null;
+    for (const state of states) closePrefetchState(state);
+}
+
+function hasCommittedPrefetchAudio(state) {
+    const meta = prefetchCommitMeta.get(state);
+    return Boolean(meta && meta.committedAudio);
+}
+
+// 未来槽仍只缓存；轮到 current run 后，把已有及后续 PCM 立即交给主播放 buffer，
+// 不再等待整段 end。baseSample 固定为 promotion 时的 writePos，segOffsets 仍按 run
+// 相对样本位移恢复 timeline。WeakMap 元数据避免改变既有 state 公共形状。
+function commitPrefetchProgress(state, final = false) {
+    if (!state || state.error) return false;
+    const hasAudio = state.chunks.some(chunk => chunk.length > 0);
+    let meta = prefetchCommitMeta.get(state);
+    if (!(meta && meta.committedAudio) && !hasAudio && !final) return false;
+    if (!meta) {
+        meta = {
+            baseSample: writePos,
+            committedAudio: false,
+            committedSegCount: 0,
+            fallbackBoundaryAdded: false,
+        };
+        prefetchCommitMeta.set(state, meta);
+    }
+    const run = runQueue[state.runIndex];
+    if (!run) return false;
+
+    while (meta.committedSegCount < state.segOffsets.length) {
+        const i = meta.committedSegCount++;
+        timeline.push({
+            startSample: meta.baseSample + state.segOffsets[i],
+            sentenceIndex: run.startSentence + i,
+        });
+    }
+    if (final && meta.committedSegCount === 0 && !meta.fallbackBoundaryAdded) {
+        timeline.push({ startSample: meta.baseSample, sentenceIndex: run.startSentence });
+        meta.fallbackBoundaryAdded = true;
+    }
+
+    if (hasAudio) {
+        for (const f32 of state.chunks) appendSamples(f32);
+        state.chunks = [];
+        meta.committedAudio = true;
+        clearPrefetchWaitTimer(state);
+        pump();
+    }
+    return meta.committedAudio || final;
+}
+
+// 跨引擎/音色时用独立 WS 预取后续 PCM；同 key 去重，所有异步事件均校验 state 身份。
+function beginPrefetch(targetRunIndex) {
+    if (targetRunIndex < 0 || targetRunIndex >= runQueue.length) return;
+    if (prefetchMap.has(targetRunIndex)) return;
+    const run = runQueue[targetRunIndex];
+    const prev = runQueue[targetRunIndex - 1];
+    if (!run || !prev) return;
+    if (prev.engine === run.engine && prev.voice === run.voice) return;
+    if (prefetchMap.size >= PREFETCH_AHEAD) return;
+    if (run.engine === "edge") {
+        const hasPendingEdge = Array.from(prefetchMap.values()).some((state) => {
+            const stateRun = runQueue[state.runIndex];
+            return stateRun && stateRun.engine === "edge" && !state.ended && !state.error;
+        });
+        if (hasPendingEdge) return;
+    }
+
+    const proto = window.location.protocol === "https:" ? "wss://" : "ws://";
+    const socket = new WebSocket(`${proto}${window.location.host}/ws/tts?prefetch=1`);
+    // segOffsets：相对本 run 音频起点的样本下标，与主路径 seg→timeline 对齐
+    const state = {
+        ws: socket, runIndex: targetRunIndex, chunks: [],
+        ended: false, error: false, sampleCount: 0, segOffsets: [],
+    };
+    prefetchMap.set(targetRunIndex, state);
+    const settle = (isError) => {
+        if (prefetchMap.get(targetRunIndex) !== state) return;
+        if (state.ended || state.error) return;
+        clearPrefetchWaitTimer(state);
+        clearPrefetchInactivityTimer(state);
+        if (isError) state.error = true;
+        else state.ended = true;
+        if (prefetchTerminalHandler) prefetchTerminalHandler(state);
+    };
+    const touchInactivity = () => {
+        clearPrefetchInactivityTimer(state);
+        if (state.ended || state.error) return;
+        const timer = setTimeout(() => {
+            if (prefetchInactivityTimers.get(state) !== timer) return;
+            prefetchInactivityTimers.delete(state);
+            if (prefetchMap.get(targetRunIndex) !== state) return;
+            if (state.ended || state.error) return;
+            // 未 promotion 的 PCM 尚未进入主 buffer，可安全丢弃；已提交 PCM 时
+            // terminal handler 会显式失败，绝不回退重放。
+            if (!hasCommittedPrefetchAudio(state)) {
+                state.chunks = [];
+                state.segOffsets = [];
+                state.sampleCount = 0;
+            }
+            settle(true);
+            closePrefetchState(state);
+        }, WS_INACTIVITY_TIMEOUT_MS);
+        prefetchInactivityTimers.set(state, timer);
+    };
+    socket.binaryType = "arraybuffer";
+    socket.onopen = () => {
+        if (prefetchMap.get(targetRunIndex) !== state) return;
+        touchInactivity();
+        socket.send(JSON.stringify({
+            text: run.text,
+            engine: run.engine,
+            voice: run.voice,
+            speed: currentSpeed,
+        }));
+    };
+    socket.onmessage = (e) => {
+        if (prefetchMap.get(targetRunIndex) !== state) return;
+        if (state.ended || state.error) return;
+        if (typeof e.data !== "string") {
+            const dv = new DataView(e.data);
+            const len = e.data.byteLength >> 1;
+            if (len > 0) touchInactivity();
+            const f32 = new Float32Array(len);
+            for (let i = 0; i < len; i++) f32[i] = dv.getInt16(i * 2, true) / 32768;
+            state.chunks.push(f32);
+            state.sampleCount += len;
+            if (prefetchProgressHandler) prefetchProgressHandler(state);
+            return;
+        }
+        try {
+            const meta = JSON.parse(e.data);
+            if (meta.type === "start") touchInactivity();
+            // 与主路径一致：seg 标记「下一单元音频」起点 = 当前已收样本数
+            if (meta.type === "seg") {
+                touchInactivity();
+                state.segOffsets.push(state.sampleCount);
+                if (prefetchProgressHandler) prefetchProgressHandler(state);
+            }
+            if (meta.type === "end") settle(false);
+            if (meta.type === "error") settle(true);
+        } catch (_) {}
+    };
+    socket.onerror = () => { settle(true); };
+    socket.onclose = () => { settle(true); };
+    touchInactivity();
+}
+
+function schedulePrefetch(fromIdx, allowEdge = true) {
+    const end = Math.min(runQueue.length, fromIdx + PREFETCH_AHEAD);
+    for (let i = fromIdx; i < end && prefetchMap.size < PREFETCH_AHEAD; i++) {
+        if (!allowEdge && runQueue[i] && runQueue[i].engine === "edge") continue;
+        beginPrefetch(i);
+    }
+}
+
+// 仅消费当前 runIndex 的 ready 槽；pending/error/absent 由统一填充控制器分别处理。
+function flushPrefetchIfReady() {
+    const state = prefetchMap.get(runIndex);
+    if (!state || state.error || !state.ended) return false;
+    // helper 会补齐尚未提交的 chunks 与 segOffsets；已 promotion 的部分不会重复。
+    commitPrefetchProgress(state, true);
+    abortPrefetch(runIndex);
+    return true;
+}
+
+// 主 WS 串行；当前预取仍在飞时等待其终态回调，ready 顺序消费，error 才回退主 WS。
 function sendRequest() {
+    clearMainInactivityTimer();
+    abortAllPrefetch();
     const proto = window.location.protocol === "https:" ? "wss://" : "ws://";
     const socket = new WebSocket(`${proto}${window.location.host}/ws/tts`);
     socket.binaryType = "arraybuffer";
     ws = socket;
     let awaitingRunTerminal = false;
     let terminalState = null;
-    const sendRun = () => sendCurrentRun(() => { awaitingRunTerminal = true; });
+    let mainEdgeAdmitted = false;
+
+    const armMainInactivityDeadline = () => {
+        clearMainInactivityTimer();
+        const timer = setTimeout(() => {
+            if (mainInactivityTimer !== timer || mainInactivitySocket !== socket) return;
+            mainInactivityTimer = null;
+            mainInactivitySocket = null;
+            if (socket !== ws || terminalState === "error") return;
+            failCurrentStream();
+        }, WS_INACTIVITY_TIMEOUT_MS);
+        mainInactivityTimer = timer;
+        mainInactivitySocket = socket;
+    };
+
+    const sendRun = () => {
+        const run = runQueue[runIndex];
+        mainEdgeAdmitted = !run || run.engine !== "edge";
+        sendCurrentRun(() => { awaitingRunTerminal = true; });
+        if (run) armMainInactivityDeadline();
+        // Edge 必须等主 decoder admission(seg)后才允许 Edge 预取；Kokoro 不占 ffmpeg，可立即预取。
+        schedulePrefetch(runIndex + 1, mainEdgeAdmitted);
+    };
+
+    const armPrefetchWaitDeadline = (state) => {
+        if (prefetchWaitTimers.has(state)) return;
+        const timer = setTimeout(() => {
+            if (prefetchWaitTimers.get(state) !== timer) return;
+            prefetchWaitTimers.delete(state);
+            if (socket !== ws) return;
+            if (prefetchMap.get(state.runIndex) !== state) return;
+            if (state.runIndex !== runIndex || state.ended || state.error || awaitingRunTerminal) return;
+            if (hasCommittedPrefetchAudio(state)) return;
+            abortPrefetch(state.runIndex);
+            terminalState = null;
+            sendRun();
+        }, PREFETCH_WAIT_GRACE_MS);
+        prefetchWaitTimers.set(state, timer);
+    };
+
+    // runIndex 指向待填充段。四种状态互斥：ready flush、pending 等待、
+    // error 删除后回退主 WS、absent 直接主 WS 请求。
+    const fillFromCurrentRun = () => {
+        while (runIndex < runQueue.length) {
+            const state = prefetchMap.get(runIndex);
+            // 当前 run 已由可用预取槽持有时才能滑动补窗；error/absent 必须先走
+            // sendRun()，由当前主 Edge 的 seg admission 决定能否发送更远 Edge。
+            if (state && !state.error) {
+                schedulePrefetch(runIndex + 1);
+            }
+            if (state && !state.ended && !state.error) {
+                commitPrefetchProgress(state);
+                if (!hasCommittedPrefetchAudio(state)) armPrefetchWaitDeadline(state);
+                return;
+            }
+            if (state && state.error) {
+                abortPrefetch(runIndex);
+                terminalState = null;
+                sendRun();
+                return;
+            }
+            if (flushPrefetchIfReady()) {
+                runIndex++;
+                segWithinRun = 0;
+                continue;
+            }
+            terminalState = null;
+            sendRun();
+            return;
+        }
+        streamEnded = true;
+        clearMainInactivityTimer(socket);
+        abortAllPrefetch();
+        maybeDone();
+    };
+
+    const failCurrentStream = () => {
+        clearMainInactivityTimer(socket);
+        awaitingRunTerminal = false;
+        terminalState = "error";
+        abortAllPrefetch();
+        if (socket === ws) {
+            ws = null;
+            try {
+                socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null;
+            } catch (_) {}
+            try { socket.close(); } catch (_) {}
+        }
+        streamEnded = true;
+        stopPumpTicker();
+        stopAllSources();
+        isPlaying = false;
+        isPaused = false;
+        setStatus("error");
+        updatePlayBtn();
+    };
+
+    prefetchProgressHandler = (state) => {
+        if (socket !== ws) return;
+        if (prefetchMap.get(state.runIndex) !== state) return;
+        if (state.runIndex !== runIndex || awaitingRunTerminal || state.error) return;
+        commitPrefetchProgress(state);
+    };
+
+    prefetchTerminalHandler = (state) => {
+        if (socket !== ws) return;
+        if (prefetchMap.get(state.runIndex) !== state) return;
+        // 已有 PCM 进入主 buffer 后不能再安全回退重合成，否则会重复朗读；显式失败。
+        if (state.error && hasCommittedPrefetchAudio(state)) {
+            failCurrentStream();
+            return;
+        }
+        // 成功槽已释放后端资源后才滑动补槽；error 要先给当前 fallback 保留 admission。
+        if (state.ended) {
+            schedulePrefetch(runIndex + 1, mainEdgeAdmitted || !awaitingRunTerminal);
+        }
+        if (state.runIndex !== runIndex || awaitingRunTerminal) return;
+        fillFromCurrentRun();
+    };
+
+    const advanceAfterRunEnd = () => {
+        clearMainInactivityTimer(socket);
+        awaitingRunTerminal = false;
+        terminalState = "end";
+        runIndex++;
+        segWithinRun = 0;
+        fillFromCurrentRun();
+    };
 
     socket.onopen = () => {
         if (socket !== ws) return;
@@ -974,6 +1504,7 @@ function sendRequest() {
         if (typeof e.data !== "string") {
             const dv = new DataView(e.data);
             const len = e.data.byteLength >> 1;
+            if (len > 0) armMainInactivityDeadline();
             const f32 = new Float32Array(len);
             for (let i = 0; i < len; i++) f32[i] = dv.getInt16(i * 2, true) / 32768;
             appendSamples(f32);
@@ -982,56 +1513,48 @@ function sendRequest() {
         }
         let meta;
         try { meta = JSON.parse(e.data); } catch (_) { return; }
+        if (meta.type === "start") {
+            armMainInactivityDeadline();
+            return;
+        }
         if (meta.type === "error") {
-            awaitingRunTerminal = false;
-            terminalState = "error";
-            // 后端拒绝/合成失败：显式进入错误态，绝不显示"完成"掩盖失败(不伪装成功)。
-            // 停止一切调度并结束流，但保留已合成音频(用户仍可回放先前成功部分)。
-            streamEnded = true;
-            stopAllSources();
-            isPlaying = false;
-            isPaused = false;
-            setStatus("error");
-            updatePlayBtn();
+            if (streamEnded && runIndex >= runQueue.length) return;
+            failCurrentStream();
             return;
         }
         if (meta.type === "seg") {
-            // 句边界标记：记录该句音频在 buffer 中的起点。句下标 = run.startSentence + 段内序号
+            armMainInactivityDeadline();
             const run = runQueue[runIndex] || { startSentence: 0 };
             const sentenceIndex = run.startSentence + segWithinRun;
             segWithinRun++;
             timeline.push({ startSample: writePos, sentenceIndex });
+            if (run.engine === "edge" && !mainEdgeAdmitted) {
+                mainEdgeAdmitted = true;
+                schedulePrefetch(runIndex + 1, true);
+            }
             return;
         }
         if (meta.type === "end") {
-            awaitingRunTerminal = false;
-            terminalState = "end";
-            // 当前 run 结束：还有下一段则继续发(不置 streamEnded，保持无缝)，否则收尾
-            runIndex++;
-            segWithinRun = 0;
-            if (runIndex < runQueue.length) {
-                terminalState = null;
-                sendRun();
-            } else {
-                streamEnded = true;
-                maybeDone();
-            }
+            if (!awaitingRunTerminal) return;
+            advanceAfterRunEnd();
         }
     };
 
     socket.onerror = () => {
         if (socket !== ws) return;
-        stopAllSources();
-        isPlaying = false;
-        isPaused = false;
-        streamEnded = true;
-        setStatus("error");
-        updatePlayBtn();
+        if (streamEnded && runIndex >= runQueue.length) return;
+        failCurrentStream();
     };
-    socket.onclose  = () => {
+    socket.onclose = () => {
         if (socket !== ws) return;
+        clearMainInactivityTimer(socket);
         if (terminalState === "error") return;
-        if (awaitingRunTerminal) {
+        if (streamEnded && runIndex >= runQueue.length) {
+            if (isPlaying) maybeDone();
+            return;
+        }
+        if (awaitingRunTerminal || runIndex < runQueue.length) {
+            abortAllPrefetch();
             stopAllSources();
             isPlaying = false;
             isPaused = false;
@@ -1047,7 +1570,9 @@ function sendRequest() {
             setStatus("idle");
         }
     };
+    armMainInactivityDeadline();
 }
+
 
 async function start() {
     // 守卫：音色目录未就绪(未加载完/加载失败)时不得合成。否则 select.value 为空,
@@ -1069,6 +1594,8 @@ async function start() {
         setStatus("error");
         return;
     }
+    // 超限不阻断：仅提示 + 高亮；computeSentences 经 textForSynthesis 截到上限内再切句发送。
+    if (isTextOverLimit()) updateCharCount();
     // 构建句级事实源 + 运行段队列：非 Auto = 同引擎合并；Auto = 按句语言分段。空文本直接忽略
     allSentences = computeSentences();
     runQueue = buildRunsFrom(0);
@@ -1076,6 +1603,7 @@ async function start() {
 
     if (!ctx) initAudio();
     if (ctx.state === "suspended") { ctx.resume().catch(() => {}); }
+    clearMainInactivityTimer();
     if (ws) { try { ws.onclose = null; ws.close(); } catch (_) {} ws = null; }
     cancelPreview();   // 作废进行中的试听，避免其 stopAllSources 掐掉本次朗读
     stopAllSources();
@@ -1100,6 +1628,8 @@ async function start() {
 // 停止：清空一切
 function stop() {
     cancelPreview();   // 主播放停止：作废进行中的试听序列，防其 stopAllSources 误触后续
+    clearMainInactivityTimer();
+    abortAllPrefetch(); // 关闭全部跨引擎预取 WS，避免后台继续合成
     stopPumpTicker();
     stopAllSources();
     if (ws) { try { ws.close(); } catch (_) {} ws = null; }
@@ -1223,7 +1753,8 @@ function drawViz() {
 
 applyLang();   // 初始化界面语言(内部刷新 voices/charCount/playBtn/status)
 drawViz();     // 页面加载即启动波形动画(待机走正弦波浪,播放时读 analyser)
-// 拉取后端音色目录填充下拉；失败则下拉为空并在状态栏提示，不伪装成功
+// 拉取运行时文本上限(与 MAX_TEXT_LENGTH 对齐) + 音色目录；失败不静默取消限长
+loadTextLimit();
 voicesPromise = loadVoices().catch(err => {
     console.error(err);
     voicesLoadError = true;   // 标记加载失败：点朗读时显式报错并重试，不静默发空 voice

@@ -38,6 +38,43 @@ html.dark option { background-color: #1f2937; color: #f1f5f9; }
 .seg-active { background: rgba(56,189,248,.15); color: rgb(2,132,199); box-shadow: inset 0 0 0 1px rgba(56,189,248,.45); }
 html.dark .seg-active { color: rgb(125,211,252); box-shadow: inset 0 0 0 1px rgba(56,189,248,.4); }
 
+/* 文本框双层：底层高亮超限段，上层透明字+光标；滚动同步由 JS 负责 */
+.text-input-shell { position: relative; }
+.text-input-shell.text-over-limit { border-color: rgba(244,63,94,.55); }
+html.dark .text-input-shell.text-over-limit { border-color: rgba(251,113,133,.5); }
+.text-highlight {
+    position: absolute; inset: 0;
+    overflow: auto;
+    padding: 1rem;
+    margin: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    /* 字号/行高由与 textarea 同一套 Tailwind class(text-base sm:text-sm leading-relaxed)提供，
+       不用 font: inherit —— 那会继承父级 shell/body 的 16px，与 textarea 的 sm:text-sm(14px)错位。 */
+    color: rgb(30 41 59);
+    pointer-events: none;
+    z-index: 0;
+}
+html.dark .text-highlight { color: rgb(241 245 249); }
+.text-highlight .text-over {
+    background: rgba(244, 63, 94, 0.22);
+    color: inherit;
+    border-radius: 2px;
+}
+html.dark .text-highlight .text-over { background: rgba(251, 113, 133, 0.28); }
+.text-input-area {
+    position: relative;
+    z-index: 1;
+    color: transparent;
+    caret-color: rgb(14 165 233);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+.text-input-area::placeholder { color: rgb(148 163 184); }
+html.dark .text-input-area::placeholder { color: rgb(100 116 139); }
+
 /* ============================================================
    API 文档页 (api.html) 专属样式
    全部作用域限定在 body.api-doc 下，避免裸元素选择器(h1/pre/table 等)
