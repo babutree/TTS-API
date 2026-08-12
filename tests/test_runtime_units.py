@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """运行时内部单元测试：startup、run_kokoro、Edge 音色缓存、ffmpeg 命令、进程回收。"""
 import asyncio
+import inspect
+import threading
 import time
 import unittest
 from unittest import mock
@@ -124,7 +126,34 @@ class RunKokoroTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pcm, b"")
         self.assertEqual(zh.calls, [])
 
-    async def test_cancel_event_stops_before_appending_audio(self):
+    async def test_pure_ascii_digits_are_admitted_to_kokoro(self):
+        pipeline = _RecordingPipeline([[0.25]])
+        self.app.pipeline_en = pipeline
+
+        pcm = await self.app.run_kokoro("12345", "af_heart", 1.0)
+
+        self.assertEqual(pipeline.calls, [{"text": "12345", "voice": "af_heart", "speed": 1.0}])
+        self.assertEqual(pcm, self.app.to_pcm(np.array([0.25], dtype=np.float32)))
+
+    async def test_fullwidth_latin_and_nfc_latin_are_not_rejected(self):
+        pipeline = _RecordingPipeline([[0.25]])
+        self.app.pipeline_en = pipeline
+
+        await self.app.run_kokoro("Ｈｅｌｌｏ", "af_heart", 1.0)
+        await self.app.run_kokoro("é", "af_heart", 1.0)
+
+        self.assertEqual([call["text"] for call in pipeline.calls], ["Ｈｅｌｌｏ", "é"])
+
+    async def test_plane_three_han_is_admitted_to_chinese_kokoro(self):
+        pipeline = _RecordingPipeline([[0.25]])
+        self.app.pipeline_zh = pipeline
+
+        await self.app.run_kokoro("\U00030000", "zf_xiaoxiao", 1.0)
+
+        self.assertEqual(pipeline.calls, [{"text": "\U00030000", "voice": "zf_xiaoxiao", "speed": 1.0}])
+
+
+    async def test_cancel_event_stops_before_dispatching_pipeline(self):
         pipeline = _RecordingPipeline([[1.0]])
         self.app.pipeline_en = pipeline
         self.app.pipeline_zh = _RecordingPipeline([[1.0]])
@@ -134,7 +163,205 @@ class RunKokoroTests(unittest.IsolatedAsyncioTestCase):
         pcm = await self.app.run_kokoro("hello", "af_heart", 1.0, cancel_event)
 
         self.assertEqual(pcm, b"")
-        self.assertEqual(pipeline.calls, [{"text": "hello", "voice": "af_heart", "speed": 1.0}])
+        self.assertEqual(pipeline.calls, [])
+
+    async def test_cancellation_holds_semaphore_until_worker_finishes(self):
+        worker_started = threading.Event()
+        allow_worker_finish = threading.Event()
+        worker_finished = threading.Event()
+
+        class BlockingPipeline:
+            def __call__(self, text, voice, speed):
+                worker_started.set()
+                allow_worker_finish.wait(timeout=2.0)
+                worker_finished.set()
+                yield _FakeResult([0.5])
+
+        semaphore = asyncio.Semaphore(1)
+        self.app._synthesis_semaphore = semaphore
+        self.app.pipeline_en = BlockingPipeline()
+        self.app.pipeline_zh = _RecordingPipeline([[1.0]])
+
+        task = asyncio.create_task(
+            self.app.run_kokoro("hello", "af_heart", 1.0)
+        )
+        acquired_after_cancel = None
+        completed_after_cancel = None
+        competitor = None
+        try:
+            started = await asyncio.to_thread(worker_started.wait, 1.0)
+            self.assertTrue(started, "Kokoro worker did not start")
+
+            task.cancel()
+            competitor = asyncio.create_task(semaphore.acquire())
+            for _ in range(5):
+                await asyncio.sleep(0)
+            completed_after_cancel = task.done()
+            acquired_after_cancel = competitor.done()
+        finally:
+            allow_worker_finish.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            if competitor is not None:
+                await asyncio.wait_for(competitor, timeout=1.0)
+                semaphore.release()
+
+        self.assertFalse(
+            completed_after_cancel,
+            "request cancellation must wait for the in-flight worker",
+        )
+        self.assertFalse(
+            acquired_after_cancel,
+            "the synthesis slot must stay held while the worker is running",
+        )
+        self.assertTrue(worker_finished.is_set())
+
+    async def test_cancel_event_while_queued_exits_without_waiting_for_slot(self):
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        self.app._synthesis_semaphore = semaphore
+        pipeline = _RecordingPipeline([[0.5]])
+        self.app.pipeline_en = pipeline
+        self.app.pipeline_zh = _RecordingPipeline([[1.0]])
+        cancel_event = asyncio.Event()
+
+        task = asyncio.create_task(
+            self.app.run_kokoro(
+                "hello", "af_heart", 1.0, cancel_event=cancel_event
+            )
+        )
+        for _ in range(5):
+            await asyncio.sleep(0)
+        cancel_event.set()
+
+        timed_out = False
+        pcm = None
+        try:
+            pcm = await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+        except asyncio.TimeoutError:
+            timed_out = True
+        finally:
+            # 释放测试预先占用的槽，并确保 RED 路径不遗留后台任务。
+            semaphore.release()
+            if not task.done():
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        self.assertFalse(
+            timed_out,
+            "cancel_event must wake a request queued for the synthesis slot",
+        )
+        self.assertEqual(pcm, b"")
+        self.assertEqual(pipeline.calls, [])
+
+    async def test_inflight_cancel_event_holds_slot_until_worker_finishes(self):
+        worker_started = threading.Event()
+        allow_worker_finish = threading.Event()
+        worker_finished = threading.Event()
+
+        class BlockingPipeline:
+            def __call__(self, text, voice, speed):
+                worker_started.set()
+                allow_worker_finish.wait(timeout=2.0)
+                worker_finished.set()
+                yield _FakeResult([0.5])
+
+        semaphore = asyncio.Semaphore(1)
+        self.app._synthesis_semaphore = semaphore
+        self.app.pipeline_en = BlockingPipeline()
+        self.app.pipeline_zh = _RecordingPipeline([[1.0]])
+        cancel_event = asyncio.Event()
+        task = asyncio.create_task(
+            self.app.run_kokoro(
+                "hello", "af_heart", 1.0, cancel_event=cancel_event
+            )
+        )
+        competitor = None
+        completed_before_worker_exit = None
+        acquired_before_worker_exit = None
+        pcm = None
+        try:
+            started = await asyncio.to_thread(worker_started.wait, 1.0)
+            self.assertTrue(started, "Kokoro worker did not start")
+
+            cancel_event.set()
+            competitor = asyncio.create_task(semaphore.acquire())
+            for _ in range(5):
+                await asyncio.sleep(0)
+            completed_before_worker_exit = task.done()
+            acquired_before_worker_exit = competitor.done()
+        finally:
+            allow_worker_finish.set()
+            pcm = await asyncio.wait_for(task, timeout=1.0)
+            if competitor is not None:
+                await asyncio.wait_for(competitor, timeout=1.0)
+                semaphore.release()
+
+        self.assertFalse(completed_before_worker_exit)
+        self.assertFalse(acquired_before_worker_exit)
+        self.assertTrue(worker_finished.is_set())
+        self.assertEqual(pcm, b"")
+
+    async def test_cancel_event_racing_slot_release_does_not_leak_permit(self):
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        self.app._synthesis_semaphore = semaphore
+        pipeline = _RecordingPipeline([[0.5]])
+        self.app.pipeline_en = pipeline
+        self.app.pipeline_zh = _RecordingPipeline([[1.0]])
+        cancel_event = asyncio.Event()
+
+        task = asyncio.create_task(
+            self.app.run_kokoro(
+                "hello", "af_heart", 1.0, cancel_event=cancel_event
+            )
+        )
+        for _ in range(5):
+            await asyncio.sleep(0)
+        cancel_event.set()
+        semaphore.release()
+
+        pcm = await asyncio.wait_for(task, timeout=1.0)
+        self.assertEqual(pcm, b"")
+        self.assertEqual(pipeline.calls, [])
+
+        # 竞态后应恰好恢复一个 permit：既不泄漏，也不重复释放。
+        await asyncio.wait_for(semaphore.acquire(), timeout=1.0)
+        second = asyncio.create_task(semaphore.acquire())
+        try:
+            for _ in range(5):
+                await asyncio.sleep(0)
+            self.assertFalse(second.done())
+        finally:
+            semaphore.release()
+            await asyncio.wait_for(second, timeout=1.0)
+            semaphore.release()
+
+    async def test_outer_cancel_while_queued_does_not_leave_acquire_task(self):
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        self.app._synthesis_semaphore = semaphore
+        pipeline = _RecordingPipeline([[0.5]])
+        self.app.pipeline_en = pipeline
+        self.app.pipeline_zh = _RecordingPipeline([[1.0]])
+        cancel_event = asyncio.Event()
+
+        task = asyncio.create_task(
+            self.app.run_kokoro(
+                "hello", "af_heart", 1.0, cancel_event=cancel_event
+            )
+        )
+        for _ in range(5):
+            await asyncio.sleep(0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        semaphore.release()
+
+        await asyncio.wait_for(semaphore.acquire(), timeout=1.0)
+        semaphore.release()
+        self.assertEqual(pipeline.calls, [])
 
     async def test_empty_generator_returns_empty_pcm(self):
         pipeline = _RecordingPipeline([])
@@ -215,6 +442,245 @@ class RunKokoroTests(unittest.IsolatedAsyncioTestCase):
                     await task
                 except asyncio.CancelledError:
                     pass
+
+    async def test_synthesis_waiter_limit_rejects_excess_queue(self):
+        self.app.TTS_MAX_SYNTHESIS_WAITERS = 1
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        self.app._synthesis_semaphore = semaphore
+        self.app.pipeline_en = _RecordingPipeline([[0.5]])
+        self.app.pipeline_zh = _RecordingPipeline([[1.0]])
+
+        first = asyncio.create_task(
+            self.app.run_kokoro("first", "af_heart", 1.0)
+        )
+        second = None
+        try:
+            for _ in range(20):
+                if len(getattr(semaphore, "_waiters", ()) or ()) == 1:
+                    break
+                await asyncio.sleep(0)
+            self.assertEqual(len(semaphore._waiters), 1)
+
+            second = asyncio.create_task(
+                self.app.run_kokoro("second", "af_heart", 1.0)
+            )
+            try:
+                await asyncio.wait_for(second, timeout=0.1)
+            except asyncio.TimeoutError:
+                self.fail("excess Kokoro waiter queued instead of being rejected")
+            except RuntimeError as exc:
+                self.assertEqual(type(exc).__name__, "_SynthesisQueueFull")
+                self.assertIn("queue", str(exc).lower())
+            else:
+                self.fail("excess Kokoro waiter unexpectedly entered synthesis")
+            self.assertEqual(len(semaphore._waiters), 1)
+        finally:
+            if second is not None and not second.done():
+                second.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await second
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            semaphore.release()
+
+    async def test_synthesis_waiter_limit_survives_same_tick_ws_burst(self):
+        self.app.TTS_MAX_SYNTHESIS_CONCURRENCY = 2
+        self.app.TTS_MAX_SYNTHESIS_WAITERS = 1
+        semaphore = asyncio.Semaphore(2)
+        self.app._synthesis_semaphore = semaphore
+        cancel_events = [asyncio.Event() for _ in range(20)]
+        tasks = [
+            asyncio.create_task(
+                self.app._acquire_kokoro_permit(cancel_event)
+            )
+            for cancel_event in cancel_events
+        ]
+        permits = []
+        try:
+            for _ in range(20):
+                await asyncio.sleep(0)
+
+            pending = [task for task in tasks if not task.done()]
+            admitted = [
+                task.result()
+                for task in tasks
+                if task.done() and task.exception() is None
+            ]
+            rejected = [
+                task.exception()
+                for task in tasks
+                if task.done() and task.exception() is not None
+            ]
+            permits.extend(admitted)
+
+            self.assertEqual(len(admitted), 2)
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(len(rejected), 17)
+            self.assertTrue(
+                all(
+                    type(exc).__name__ == "_SynthesisQueueFull"
+                    for exc in rejected
+                )
+            )
+            self.assertEqual(len(semaphore._waiters), 1)
+            self.assertEqual(self.app._synthesis_waiter_count, 1)
+
+            permits.pop().release()
+            permit = await asyncio.wait_for(pending[0], timeout=0.2)
+            permits.append(permit)
+            self.assertEqual(self.app._synthesis_waiter_count, 0)
+        finally:
+            for event in cancel_events:
+                event.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for permit in permits:
+                permit.release()
+
+        self.assertEqual(semaphore._value, 2)
+        self.assertEqual(len(semaphore._waiters), 0)
+        self.assertEqual(self.app._synthesis_waiter_count, 0)
+
+    async def test_single_slot_rejects_prefetch_but_allows_normal(self):
+        self.assertIn(
+            "prefetch",
+            inspect.signature(self.app._acquire_kokoro_permit).parameters,
+            "Kokoro permit admission lacks prefetch reservation",
+        )
+        self.app.TTS_MAX_SYNTHESIS_CONCURRENCY = 1
+        self.app._synthesis_semaphore = asyncio.Semaphore(1)
+
+        with self.assertRaisesRegex(RuntimeError, "prefetch"):
+            await self.app._acquire_kokoro_permit(prefetch=True)
+
+        permit = await asyncio.wait_for(
+            self.app._acquire_kokoro_permit(), timeout=0.2
+        )
+        self.assertIsNotNone(permit)
+        permit.release()
+
+    async def test_dual_slots_admit_one_prefetch_and_reserve_normal(self):
+        self.assertIn(
+            "prefetch",
+            inspect.signature(self.app._acquire_kokoro_permit).parameters,
+            "Kokoro permit admission lacks prefetch reservation",
+        )
+        self.app.TTS_MAX_SYNTHESIS_CONCURRENCY = 2
+        self.app._synthesis_semaphore = asyncio.Semaphore(2)
+
+        first = await self.app._acquire_kokoro_permit(prefetch=True)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "prefetch"):
+                await self.app._acquire_kokoro_permit(prefetch=True)
+
+            normal = await asyncio.wait_for(
+                self.app._acquire_kokoro_permit(), timeout=0.2
+            )
+            self.assertIsNotNone(normal)
+            normal.release()
+        finally:
+            first.release()
+
+    async def test_busy_slots_reject_prefetch_without_using_normal_waiter(self):
+        self.assertIn(
+            "prefetch",
+            inspect.signature(self.app._acquire_kokoro_permit).parameters,
+            "Kokoro permit admission lacks prefetch reservation",
+        )
+        self.app.TTS_MAX_SYNTHESIS_CONCURRENCY = 2
+        self.app.TTS_MAX_SYNTHESIS_WAITERS = 1
+        semaphore = asyncio.Semaphore(2)
+        await semaphore.acquire()
+        await semaphore.acquire()
+        self.app._synthesis_semaphore = semaphore
+        cancel_event = asyncio.Event()
+        normal_task = None
+        normal_permit = None
+        try:
+            with self.assertRaisesRegex(RuntimeError, "prefetch"):
+                await asyncio.wait_for(
+                    self.app._acquire_kokoro_permit(prefetch=True),
+                    timeout=0.1,
+                )
+            self.assertEqual(self.app._synthesis_waiter_count, 0)
+            self.assertEqual(self.app._kokoro_prefetch_reserved, 0)
+            self.assertEqual(len(semaphore._waiters or ()), 0)
+
+            normal_task = asyncio.create_task(
+                self.app._acquire_kokoro_permit(cancel_event=cancel_event)
+            )
+            for _ in range(20):
+                if (
+                    self.app._synthesis_waiter_count == 1
+                    and len(semaphore._waiters or ()) == 1
+                ):
+                    break
+                await asyncio.sleep(0)
+            self.assertEqual(self.app._synthesis_waiter_count, 1)
+            self.assertEqual(len(semaphore._waiters or ()), 1)
+
+            semaphore.release()
+            normal_permit = await asyncio.wait_for(normal_task, timeout=0.2)
+            self.assertIsNotNone(normal_permit)
+            self.assertEqual(self.app._synthesis_waiter_count, 0)
+        finally:
+            cancel_event.set()
+            if normal_task is not None and not normal_task.done():
+                normal_task.cancel()
+                await asyncio.gather(normal_task, return_exceptions=True)
+            if normal_permit is not None:
+                normal_permit.release()
+            semaphore.release()
+
+        self.assertEqual(semaphore._value, 2)
+        self.assertEqual(len(semaphore._waiters or ()), 0)
+        self.assertEqual(self.app._synthesis_waiter_count, 0)
+        self.assertEqual(self.app._kokoro_prefetch_reserved, 0)
+
+
+class ValidationBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        disable_asyncio_debug()
+        self.app = import_app_with_fakes()
+
+    async def test_edge_rate_rounds_to_nearest_percent(self):
+        captured = []
+
+        async def fake_iter(text, voice, rate):
+            captured.append(rate)
+            yield b"audio"
+
+        self.app._iter_edge_audio = fake_iter
+        for speed in (0.5, 0.8, 0.9, 1.2, 3.0):
+            await self.app._feed_mp3(FakeProc(), "hello", "edge", "voice", speed)
+
+        self.assertEqual(
+            captured,
+            ["-50%", "-20%", "-10%", "+20%", "+200%"],
+        )
+
+    def test_non_positive_max_text_length_fails_fast(self):
+        for raw in ("0", "-1"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError):
+                    self.app.parse_max_text_length(raw)
+
+    def test_legacy_rest_rejects_non_finite_speed(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaises(Exception):
+                    self.app.TTSRequest(text="hello", engine="edge", voice="en-US-AvaNeural", speed=value)
+
+    def test_legacy_ws_non_finite_speed_falls_back_to_one(self):
+        for value in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(value=value):
+                parsed = self.app.parse_ws_request({"text": "hello", "engine": "edge", "speed": value})
+                self.assertEqual(parsed.get("type"), "ok")
+                self.assertEqual(parsed.get("speed"), 1.0)
 
 
 class EdgeVoiceCacheTests(unittest.IsolatedAsyncioTestCase):
@@ -701,6 +1167,76 @@ class Mp3EncoderCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("1", captured["args"])
         self.assertIn("libmp3lame", captured["args"])
 
+    async def test_openai_formats_use_matching_ffmpeg_codec_and_muxer(self):
+        captured = []
+
+        async def fake_exec(*args, **kwargs):
+            captured.append(args)
+            return FakeProc()
+
+        self.app.asyncio.create_subprocess_exec = fake_exec
+        encoder = getattr(self.app, "_create_openai_audio_encoder", None)
+        self.assertIsNotNone(
+            encoder, "OpenAI 多格式编码器尚未实现"
+        )
+        expected = {
+            "opus": ("libopus", "opus"),
+            "aac": ("aac", "adts"),
+            "flac": ("flac", "flac"),
+            "wav": ("pcm_s16le", "wav"),
+            "pcm": ("pcm_s16le", "s16le"),
+        }
+        for engine in ("edge", "kokoro"):
+            for response_format, (codec, muxer) in expected.items():
+                with self.subTest(engine=engine, response_format=response_format):
+                    proc = await encoder(engine, response_format)
+                    try:
+                        self.assertIsInstance(proc, FakeProc)
+                        args = captured[-1]
+                        self.assertIn(codec, args)
+                        format_positions = [
+                            i for i, arg in enumerate(args) if arg == "-f"
+                        ]
+                        self.assertEqual(args[format_positions[-1] + 1], muxer)
+                        if engine == "kokoro":
+                            self.assertEqual(
+                                args[:9],
+                                (
+                                    "ffmpeg", "-f", "s16le", "-ar", "24000",
+                                    "-ac", "1", "-i", "pipe:0",
+                                ),
+                            )
+                        else:
+                            self.assertEqual(
+                                args[:3], ("ffmpeg", "-i", "pipe:0")
+                            )
+                    finally:
+                        await self.app._reap_proc(proc)
+
+    async def test_openai_encoder_spawn_failure_releases_limiter(self):
+        releases = []
+
+        class RecordingLimiter:
+            async def acquire(self, prefetch=False):
+                return True
+
+            def release(self, prefetch=False):
+                releases.append(prefetch)
+
+        async def fail_exec(*args, **kwargs):
+            raise OSError("ffmpeg unavailable")
+
+        self.app._ffmpeg_limiter = RecordingLimiter()
+        self.app.asyncio.create_subprocess_exec = fail_exec
+        encoder = getattr(self.app, "_create_openai_audio_encoder", None)
+        self.assertIsNotNone(
+            encoder, "OpenAI 多格式编码器尚未实现"
+        )
+
+        with self.assertRaisesRegex(OSError, "ffmpeg unavailable"):
+            await encoder("edge", "opus")
+        self.assertEqual(releases, [False])
+
 
 class FfmpegLimiterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -767,6 +1303,52 @@ class ReapProcTests(unittest.IsolatedAsyncioTestCase):
         await self.app._reap_proc(proc)
 
         self.assertTrue(proc.waited)
+
+    async def test_reap_proc_waits_and_releases_after_kill_oserror(self):
+        class PermissionProc(FakeProc):
+            def kill(self):
+                raise PermissionError("terminate denied")
+
+        releases = []
+
+        class RecordingLimiter:
+            def release(self, prefetch=False):
+                releases.append(prefetch)
+
+        proc = PermissionProc()
+        self.app._ffmpeg_limiter = RecordingLimiter()
+        error = None
+        try:
+            await self.app._reap_proc(proc)
+        except PermissionError as exc:
+            error = exc
+
+        self.assertIsNone(error, "kill failure must not bypass process wait")
+        self.assertTrue(proc.waited)
+        self.assertEqual(releases, [False])
+
+    async def test_reap_edge_waits_and_releases_after_kill_oserror(self):
+        class PermissionProc(FakeProc):
+            def kill(self):
+                raise PermissionError("terminate denied")
+
+        releases = []
+
+        class RecordingLimiter:
+            def release(self, prefetch=False):
+                releases.append(prefetch)
+
+        proc = PermissionProc()
+        self.app._ffmpeg_limiter = RecordingLimiter()
+        error = None
+        try:
+            await self.app._reap_edge_pcm_decoder(proc, prefetch=True)
+        except PermissionError as exc:
+            error = exc
+
+        self.assertIsNone(error, "kill failure must not bypass decoder wait")
+        self.assertTrue(proc.waited)
+        self.assertEqual(releases, [True])
 
     async def test_reap_proc_defers_cancellation_until_wait_and_release(self):
         wait_started = asyncio.Event()

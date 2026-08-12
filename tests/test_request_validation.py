@@ -41,6 +41,20 @@ class TTSRequestValidationTests(unittest.TestCase):
 
         self.assertEqual(req.voice, "arbitrary-edge-voice")
 
+    def test_edge_voice_rejects_blank_control_surrogate_and_excessive_length(self):
+        for voice in ("   ", "bad\nvoice", "bad\ud800voice", "v" * 4096):
+            with self.subTest(voice=repr(voice)):
+                with self.assertRaises(ValueError):
+                    self.app.TTSRequest(text="hello", engine="edge", voice=voice)
+
+    def test_edge_voice_length_boundary_is_256_characters(self):
+        accepted = self.app.TTSRequest(
+            text="hello", engine="edge", voice="v" * 256
+        )
+        self.assertEqual(len(accepted.voice), 256)
+        with self.assertRaises(ValueError):
+            self.app.TTSRequest(text="hello", engine="edge", voice="v" * 257)
+
 
 class ParseWsRequestTests(unittest.TestCase):
     def setUp(self):
@@ -103,6 +117,14 @@ class ParseWsRequestTests(unittest.TestCase):
         self.assertEqual(bad["type"], "error")
         self.assertEqual(edge["type"], "ok")
         self.assertEqual(edge["voice"], "whatever")
+
+    def test_rejects_invalid_edge_voice_shape_and_content(self):
+        for voice in (None, [], {}, "   ", "bad\nvoice", "bad\ud800voice", "v" * 4096):
+            with self.subTest(voice=repr(voice)):
+                parsed = self.app.parse_ws_request(
+                    {"text": "hi", "engine": "edge", "voice": voice}
+                )
+                self.assertEqual(parsed["type"], "error")
 
     def test_defaults_to_kokoro_xiaoxiao_one_x(self):
         parsed = self.app.parse_ws_request({"text": "hi"})

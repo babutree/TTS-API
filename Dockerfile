@@ -26,4 +26,5 @@ COPY favicon.ico .
 
 EXPOSE 8880
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8880"]
+# WebSocket 浏览器鉴权使用 ?key=；禁用 Uvicorn 原始 access log，避免把查询密钥写入 stdout。
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8880", "--no-access-log"]

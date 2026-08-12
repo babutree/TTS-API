@@ -20,13 +20,22 @@ services:
       - EDGE_VOICES_FAILURE_COOLDOWN_SECONDS=5
       # Edge 音色列表每次上游请求的超时(有限非负秒数)；0 表示关闭。
       - EDGE_VOICES_REQUEST_TIMEOUT_SECONDS=5
-      # 单请求合成 wall-clock 超时(秒)；0 表示关闭。公网/多用户部署建议设置为非 0。
+      # 合成超时(秒)；预流阶段为总 deadline，流开始后为逐块空闲期限；0 表示关闭。
+      # 公网/多用户部署建议根据最长允许静默设置为非 0。
       - TTS_SYNTHESIS_TIMEOUT_SECONDS=0
       # ffmpeg 子进程并发上限；超限显式拒绝请求，避免 CPU/内存被打满。
       - TTS_MAX_FFMPEG_PROCESSES=2
       # Kokoro 推理并发上限(REST/WS 共用)；超限的请求排队等待，避免线程池被占满。
       # WS 的 Kokoro 不产生 ffmpeg，此闸门是其唯一并发保护，公网/多用户建议按 CPU 核数调小。
       - TTS_MAX_SYNTHESIS_CONCURRENCY=2
+      # Kokoro 等待队列上限(不含正在推理者)；队满时显式拒绝，避免请求无限堆积。
+      - TTS_MAX_SYNTHESIS_WAITERS=16
+      # HTTP 请求体上限(字节)，同时约束 Content-Length 与 chunked 实际累计大小。
+      - TTS_MAX_REQUEST_BODY_BYTES=1048576
+      # 单次 HTTP response body 写入的空闲超时(秒)；0 表示关闭慢读保护。
+      - TTS_RESPONSE_WRITE_TIMEOUT_SECONDS=30
+      # Kokoro 单次内部推理片段的最大字符数；长单元仍被接受并按序内部切分。
+      - KOKORO_MAX_UNIT_CHARS=2000
       # 对外 API 鉴权密钥：留空 = 完全开放(仅本地/内网直连时用)；
       # 设为非空即对外部程序化客户端(如浏览器扩展)启用鉴权。同源自有页面(/index.html、/api)始终免密。
       # 【部署前请务必改成你自己的随机长密钥】，例如 openssl rand -hex 32 生成。

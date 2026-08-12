@@ -1,4 +1,4 @@
-# Runtime dependencies for the TTS API.
+# Runtime dependencies for TTS-API.
 # PyTorch CPU wheels are published on the PyTorch index, not default PyPI.
 --extra-index-url https://download.pytorch.org/whl/cpu
 fastapi==0.128.0

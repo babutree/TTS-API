@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title id="docTitle">TTS API Reference</title>
+    <title id="docTitle">TTS-API Reference</title>
     <!-- 样式抽到共享 style.css，全部作用域限定在 body.api-doc 下 -->
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" href="/favicon.ico">
@@ -18,7 +18,7 @@
                 </svg>
             </a>
         </div>
-        <h1 data-i18n="pageTitle">TTS API Reference</h1>
+        <h1 data-i18n="pageTitle">TTS-API Reference</h1>
         <p class="sub" data-i18n="sub">Streaming text-to-speech · 24kHz mono 16-bit PCM · Kokoro on-device / Edge Microsoft cloud</p>
 
         <div class="toc">
@@ -29,6 +29,7 @@
             <a href="#voices" data-i18n="tocVoices">Voices</a>
             <a href="#preview" data-i18n="tocPreview">Voice preview</a>
             <a href="#tts" data-i18n="tocTts">REST synthesis</a>
+            <a href="#openai" data-i18n="tocOpenAI">OpenAI compatibility</a>
             <a href="#ws" data-i18n="tocWs">WebSocket synthesis</a>
             <a href="#format" data-i18n="tocFormat">Audio format</a>
             <a href="#static" data-i18n="tocStatic">Static files</a>
@@ -39,7 +40,7 @@
         <ul>
             <li data-i18n-html="authLi1"><strong>Where the key comes from</strong>: set the <code>TTS_API_KEY</code> environment variable in <code>docker-compose.yml</code>. <strong>Change it to your own strong random value.</strong></li>
             <li data-i18n-html="authLi2"><strong>Empty (unset) = fully open</strong>: any request is allowed, keeping local direct-connect usage working.</li>
-            <li data-i18n-html="authLi3"><strong>Same-origin pages are exempt</strong>: this docs page and the main UI (<code>/index.html</code>) are <strong>same-origin</strong> with the backend and need no key in a browser.</li>
+            <li data-i18n-html="authLi3"><strong>Same-origin pages are exempt only for eligible UI APIs</strong>: this docs page and the main UI (<code>/index.html</code>) can use eligible <code>/api</code> routes and WebSocket without a key. <strong><code>/api/auth</code> and <code>/api/logs</code> never use this exemption; neither does <code>/v1/*</code></strong> when a key is configured.</li>
             <li data-i18n-html="authLi4"><strong>External clients must send the key</strong>: REST uses header <code>X-API-Key: &lt;key&gt;</code> (preferred, especially behind Caddy Basic Auth) or <code>Authorization: Bearer &lt;key&gt;</code>; WebSocket cannot set custom headers in a browser, so use query parameter <code>/ws/tts?key=&lt;key&gt;</code>.</li>
         </ul>
         <p class="hint" data-i18n="authHint">Honest boundary: same-origin exemption relies on the Origin/Referer header, which non-browser clients can forge. For real network isolation still put a reverse proxy (Caddy) in front; the key provides controlled access for external integrations.</p>
@@ -70,7 +71,7 @@ fetch("https://tts.example.com/api/tts", {
         <h2 id="health"><span class="method">GET</span><span class="path">/</span></h2>
         <p data-i18n-html="healthDesc">Health check. Returns the engine and <code>ffmpeg</code> readiness status.</p>
         <h3 data-i18n="healthResp200">Response 200 — engine ready</h3>
-        <pre><code>{ "status": "v0.11 engine running", "ready": true, "max_text_length": 100000 }</code></pre>
+        <pre><code>{ "status": "v0.12 engine running", "ready": true, "max_text_length": 100000 }</code></pre>
         <p data-i18n-html="healthMaxTextNote"><code>max_text_length</code> mirrors <code>MAX_TEXT_LENGTH</code> (present on 200 and 503) so the UI can highlight overflow and speak only the in-limit portion.</p>
         <h3 data-i18n="healthResp503">Response 503 — engine starting</h3>
         <pre><code>{ "status": "starting", "ready": false, "max_text_length": 100000 }</code></pre>
@@ -180,6 +181,22 @@ fetch("https://tts.example.com/api/tts", {
             <audio id="ttsAudio" controls hidden></audio>
         </div>
 
+        <h2 id="openai"><span class="method">POST</span><span class="path">/v1/audio/speech</span></h2>
+        <p data-i18n-html="openaiDesc">OpenAI-compatible binary speech endpoint for SDKs and agents such as Hermes and OpenClaw. Set the client base URL to <code>http://&lt;host&gt;:8880/v1</code>.</p>
+        <ul>
+            <li data-i18n-html="openaiAuth"><strong>Authentication</strong>: when <code>TTS_API_KEY</code> is configured, send Bearer or <code>X-API-Key</code>; forged same-origin headers never bypass <code>/v1</code>.</li>
+            <li data-i18n-html="openaiFormats"><strong>Formats</strong>: <code>mp3</code>, <code>opus</code>, <code>aac</code>, <code>flac</code>, <code>wav</code>, and raw 24 kHz mono s16le <code>pcm</code>. MIME and filename extension follow the requested format.</li>
+            <li data-i18n-html="openaiVoices"><strong>Voices</strong>: real IDs for the selected model (Edge/Kokoro), or seven aliases including <code>coral</code>. A Kokoro ID requires <code>model:"kokoro"</code>. <code>alloy</code>/<code>coral</code> use adult Edge voice Ava; real Ana remains selectable by ID.</li>
+            <li data-i18n-html="openaiKokoroScripts"><strong>Kokoro scripts</strong>: English voices allow Latin letters and Chinese voices allow Han letters; other Unicode letter scripts return <code>422</code> before synthesis. Numbers, punctuation, whitespace, and combining marks are neutral.</li>
+            <li data-i18n-html="openaiBoundaries"><strong>Explicit boundaries</strong>: SSE, non-empty <code>instructions</code>, <code>lang_code</code>/<code>lang</code>/<code>language</code>, the guide-only <code>format</code> alias, and custom voice objects are not implemented and return <code>400</code>/<code>422</code>.</li>
+            <li data-i18n-html="openaiMore"><strong>Full contract</strong>: error shape, format table, model fallback, discovery-subset differences, and client matrices are documented in the repository <code>API.md</code> and compatibility audit.</li>
+        </ul>
+        <pre><code>curl http://localhost:8880/v1/audio/speech \
+  -H "Authorization: Bearer $TTS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"input":"Hello","model":"edge","voice":"coral","response_format":"mp3"}' \
+  --output speech.mp3</code></pre>
+
         <h2 id="ws"><span class="method">WS</span><span class="path">/ws/tts</span></h2>
         <p data-i18n="wsDesc">Interactive TTS session. Send a JSON request, receive a stream of binary PCM frames interleaved with JSON control messages. The connection stays open after a request completes, so you can send the next request.</p>
 
@@ -206,13 +223,13 @@ fetch("https://tts.example.com/api/tts", {
         <p data-i18n-html="wsErrorDesc"><code>error</code> covers: invalid JSON, missing/empty <code>text</code>, text over length, unknown <code>engine</code>, unknown Kokoro <code>voice</code>, and synthesis failure (e.g. an invalid Edge voice or engine fault). On synthesis failure the server sends <code>error</code> instead of <code>end</code>, so the client leaves the "synthesizing" state without a false success.</p>
 
         <h3 data-i18n="wsCancelTitle">Cancel / Interrupt</h3>
-        <p data-i18n="wsCancelDesc">While the server is synthesizing, the client can send any message (or close the connection) to cancel the current request. The server immediately stops synthesis and starts listening for the next request.</p>
+        <p data-i18n="wsCancelDesc">While the server is synthesizing, the client can send any message (or close the connection) to cancel the current request. The signal immediately wakes Edge I/O and queued Kokoro work; a queued Kokoro request does not wait to acquire synthesis-slot capacity. This does not make resource cleanup instantaneous: before listening for the next request, the server waits for the Edge decoder process to exit or for an already-running Kokoro inference to stop cooperatively at the next generated chunk, then completes cleanup.</p>
 
         <h3 data-i18n="wsAutoTitle">Auto engine</h3>
         <p data-i18n-html="wsAutoDesc"><code>"engine":"auto"</code> is a <strong>client-side UI option only</strong> — it is never sent to the server. When Auto is selected, the browser splits by sentence and language boundary: Chinese (including Chinese punctuation) routes to the Chinese voice, and English (including single terms/all-caps abbreviations like <code>DNS</code>, <code>OpenWrt</code>) always routes to the English voice. Each Kokoro pipeline is monolingual — the Chinese pipeline cannot even pronounce isolated English abbreviations (official issues #95/#238), so English is never merged into a Chinese segment.</p>
 
         <h3 data-i18n="wsPrepTitle">Text preprocessing</h3>
-        <p data-i18n="wsPrepDesc1">Before synthesis the server strips Markdown formatting (code blocks, inline code, images, links, headings, blockquotes, lists, bold/italic/strikethrough, horizontal rules) and removes quotation marks (straight/curly double quotes, CJK corner brackets, guillemets), preventing markup from being read aloud or quotes producing phoneme artifacts in Kokoro.</p>
+        <p data-i18n="wsPrepDesc1">Before synthesis the server strips Markdown formatting (code blocks, inline code, images, links, headings, blockquotes, lists, bold/italic/strikethrough, horizontal rules) and removes quotation marks (straight/curly double quotes, CJK corner brackets, and Chinese book-title brackets), preventing markup from being read aloud or quotes producing phoneme artifacts in Kokoro.</p>
         <p data-i18n-html="wsPrepDesc2">Additionally Kokoro applies per-voice language filtering (a fallback safeguard): Chinese voices (<code>zf_*</code>/<code>zm_*</code>) strip all English letters before synthesis, English voices (<code>af_*</code>/<code>am_*</code>) strip all CJK characters. Each Kokoro pipeline is monolingual and mispronounces cross-language text, so stripping the other language is preferable to reading garbage. For mixed Chinese/English text, use Auto mode in the UI to route per sentence.</p>
 
         <h3 data-i18n="wsTestTitle">Online test</h3>
@@ -272,18 +289,18 @@ fetch("https://tts.example.com/api/tts", {
 // ============================================================
 const I18N = {
     en: {
-        docTitle: "TTS API Reference",
-        pageTitle: "TTS API Reference",
+        docTitle: "TTS-API Reference",
+        pageTitle: "TTS-API Reference",
         sub: "Streaming text-to-speech · 24kHz mono 16-bit PCM · Kokoro on-device / Edge Microsoft cloud",
         tocAuth: "Authentication", tocHealth: "Health check", tocAuthProbe: "Key probe",
         tocLogs: "Logs", tocVoices: "Voices", tocPreview: "Voice preview",
-        tocTts: "REST synthesis", tocWs: "WebSocket synthesis",
+        tocTts: "REST synthesis", tocOpenAI: "OpenAI compatibility", tocWs: "WebSocket synthesis",
         tocFormat: "Audio format", tocStatic: "Static files",
         authTitle: "Authentication",
         authIntro: "The service has <strong>built-in API Key authentication</strong> so external programmatic clients (browser extensions, scripts, other backends) can call it directly. Rules:",
         authLi1: "<strong>Where the key comes from</strong>: set the <code>TTS_API_KEY</code> environment variable in <code>docker-compose.yml</code>. <strong>Change it to your own strong random value.</strong>",
         authLi2: "<strong>Empty (unset) = fully open</strong>: any request is allowed, keeping local direct-connect usage working.",
-        authLi3: "<strong>Same-origin pages are exempt</strong>: this docs page and the main UI (<code>/index.html</code>) are <strong>same-origin</strong> with the backend and need no key in a browser.",
+        authLi3: "<strong>Same-origin pages are exempt only for eligible UI APIs</strong>: this docs page and the main UI (<code>/index.html</code>) can use eligible <code>/api</code> routes and WebSocket without a key. <strong><code>/api/auth</code> and <code>/api/logs</code> never use this exemption; neither does <code>/v1/*</code></strong> when a key is configured.",
         authLi4: "<strong>External clients must send the key</strong>: REST uses header <code>X-API-Key: &lt;key&gt;</code> (preferred, especially behind Caddy Basic Auth) or <code>Authorization: Bearer &lt;key&gt;</code>; WebSocket cannot set custom headers in a browser, so use query parameter <code>/ws/tts?key=&lt;key&gt;</code>.",
         authHint: "Honest boundary: same-origin exemption relies on the Origin/Referer header, which non-browser clients can forge. For real network isolation still put a reverse proxy (Caddy) in front; the key provides controlled access for external integrations.",
         authCode: "# CRX plugin call example (external client, key required)\nfetch(\"https://tts.example.com/api/tts\", {\n  method: \"POST\",\n  headers: {\n    \"Content-Type\": \"application/json\",\n    \"X-API-Key\": \"YOUR_SECRET_KEY\"\n  },\n  body: JSON.stringify({ text: \"Hello\", engine: \"kokoro\", voice: \"zf_xiaoxiao\", speed: 1.0 })\n});",
@@ -326,6 +343,13 @@ const I18N = {
         ttsResp503: "Engine not ready",
         ttsResp504: "Synthesis timed out before audio was ready",
         ttsDownloadLabel: "Download as attachment",
+        openaiDesc: "OpenAI-compatible binary speech endpoint for SDKs and agents such as Hermes and OpenClaw. Set the client base URL to <code>http://&lt;host&gt;:8880/v1</code>.",
+        openaiAuth: "<strong>Authentication</strong>: when <code>TTS_API_KEY</code> is configured, send Bearer or <code>X-API-Key</code>; forged same-origin headers never bypass <code>/v1</code>.",
+        openaiFormats: "<strong>Formats</strong>: <code>mp3</code>, <code>opus</code>, <code>aac</code>, <code>flac</code>, <code>wav</code>, and raw 24 kHz mono s16le <code>pcm</code>. MIME and filename extension follow the requested format.",
+        openaiVoices: "<strong>Voices</strong>: real IDs for the selected model (Edge/Kokoro), or seven aliases including <code>coral</code>. A Kokoro ID requires <code>model:&quot;kokoro&quot;</code>. <code>alloy</code>/<code>coral</code> use adult Edge voice Ava; real Ana remains selectable by ID.",
+        openaiKokoroScripts: "<strong>Kokoro scripts</strong>: English voices allow Latin letters and Chinese voices allow Han letters; other Unicode letter scripts return <code>422</code> before synthesis. Numbers, punctuation, whitespace, and combining marks are neutral.",
+        openaiBoundaries: "<strong>Explicit boundaries</strong>: SSE, non-empty <code>instructions</code>, <code>lang_code</code>/<code>lang</code>/<code>language</code>, the guide-only <code>format</code> alias, and custom voice objects are not implemented and return <code>400</code>/<code>422</code>.",
+        openaiMore: "<strong>Full contract</strong>: error shape, format table, model fallback, discovery-subset differences, and client matrices are documented in the repository <code>API.md</code> and compatibility audit.",
         wsDesc: "Interactive TTS session. Send a JSON request, receive a stream of binary PCM frames interleaved with JSON control messages. The connection stays open after a request completes, so you can send the next request.",
         wsC2S: "Client → Server",
         wsC2SNote: "Separate sentences with <code>\\n</code> — the server uses these as synthesis units and aligns segment boundaries 1:1 for gapless streaming. <code>speed</code> is clamped server-side to <code>0.5</code>–<code>3.0</code>.",
@@ -338,11 +362,11 @@ const I18N = {
         wsMsgError: "Request rejected or synthesis failed; connection stays open",
         wsErrorDesc: "<code>error</code> covers: invalid JSON, missing/empty <code>text</code>, text over length, unknown <code>engine</code>, unknown Kokoro <code>voice</code>, and synthesis failure (e.g. an invalid Edge voice or engine fault). On synthesis failure the server sends <code>error</code> instead of <code>end</code>, so the client leaves the \"synthesizing\" state without a false success.",
         wsCancelTitle: "Cancel / Interrupt",
-        wsCancelDesc: "While the server is synthesizing, the client can send any message (or close the connection) to cancel the current request. The server immediately stops synthesis and starts listening for the next request.",
+        wsCancelDesc: "While the server is synthesizing, the client can send any message (or close the connection) to cancel the current request. The signal immediately wakes Edge I/O and queued Kokoro work; a queued Kokoro request does not wait to acquire synthesis-slot capacity. This does not make resource cleanup instantaneous: before listening for the next request, the server waits for the Edge decoder process to exit or for an already-running Kokoro inference to stop cooperatively at the next generated chunk, then completes cleanup.",
         wsAutoTitle: "Auto engine",
         wsAutoDesc: "<code>\"engine\":\"auto\"</code> is a <strong>client-side UI option only</strong> — it is never sent to the server. When Auto is selected, the browser splits by sentence and language boundary: Chinese (including Chinese punctuation) routes to the Chinese voice, and English (including single terms/all-caps abbreviations like <code>DNS</code>, <code>OpenWrt</code>) always routes to the English voice. Each Kokoro pipeline is monolingual — the Chinese pipeline cannot even pronounce isolated English abbreviations (official issues #95/#238), so English is never merged into a Chinese segment.",
         wsPrepTitle: "Text preprocessing",
-        wsPrepDesc1: "Before synthesis the server strips Markdown formatting (code blocks, inline code, images, links, headings, blockquotes, lists, bold/italic/strikethrough, horizontal rules) and removes quotation marks (straight/curly double quotes, CJK corner brackets, guillemets), preventing markup from being read aloud or quotes producing phoneme artifacts in Kokoro.",
+        wsPrepDesc1: "Before synthesis the server strips Markdown formatting (code blocks, inline code, images, links, headings, blockquotes, lists, bold/italic/strikethrough, horizontal rules) and removes quotation marks (straight/curly double quotes, CJK corner brackets, and Chinese book-title brackets), preventing markup from being read aloud or quotes producing phoneme artifacts in Kokoro.",
         wsPrepDesc2: "Additionally Kokoro applies per-voice language filtering (a fallback safeguard): Chinese voices (<code>zf_*</code>/<code>zm_*</code>) strip all English letters before synthesis, English voices (<code>af_*</code>/<code>am_*</code>) strip all CJK characters. Each Kokoro pipeline is monolingual and mispronounces cross-language text, so stripping the other language is preferable to reading garbage. For mixed Chinese/English text, use Auto mode in the UI to route per sentence.",
         wsTestTitle: "Online test",
         wsTextLabel: "text (use line breaks to split sentences)",
@@ -376,18 +400,18 @@ const I18N = {
         outPlaceholder: "Response will appear here…",
     },
     zh: {
-        docTitle: "TTS API 文档",
-        pageTitle: "TTS API 文档",
+        docTitle: "TTS-API 文档",
+        pageTitle: "TTS-API 文档",
         sub: "流式文本转语音服务 · 24kHz 单声道 16-bit PCM · Kokoro 本机合成 / Edge 微软在线",
         tocAuth: "鉴权密钥", tocHealth: "健康检查", tocAuthProbe: "密钥探测",
         tocLogs: "日志", tocVoices: "音色列表", tocPreview: "音色试听",
-        tocTts: "REST 合成", tocWs: "WebSocket 合成",
+        tocTts: "REST 合成", tocOpenAI: "OpenAI 兼容层", tocWs: "WebSocket 合成",
         tocFormat: "音频格式", tocStatic: "静态资源",
         authTitle: "鉴权密钥",
         authIntro: "本服务<strong>内置 API Key 鉴权</strong>，用于让外部程序化客户端（如浏览器扩展 CRX、脚本、其他后端）合法接入。规则：",
         authLi1: "<strong>密钥从哪来</strong>：在 <code>docker-compose.yml</code> 的 <code>TTS_API_KEY</code> 环境变量中配置，<strong>请自行改成你自己的强随机值</strong>。",
         authLi2: "<strong>未配置（留空）= 完全开放</strong>：兼容本地直连，任意请求放行。",
-        authLi3: "<strong>自有页面免密</strong>：本文档页与主 UI（<code>/index.html</code>）与后端<strong>同源</strong>，浏览器直接使用时无需密钥。",
+        authLi3: "<strong>仅符合条件的 UI 接口可同源免密</strong>：本文档页与主 UI（<code>/index.html</code>）可免密使用符合条件的 <code>/api</code> 路由与 WebSocket；配置密钥后，<strong><code>/api/auth</code>、<code>/api/logs</code> 与 <code>/v1/*</code> 均不使用该豁免</strong>。",
         authLi4: "<strong>外部客户端需带密钥</strong>：REST 优先用请求头 <code>X-API-Key: &lt;密钥&gt;</code>（尤其适合 Caddy Basic Auth 前置场景），也支持 <code>Authorization: Bearer &lt;密钥&gt;</code>；WebSocket 浏览器无法设自定义头，用查询参数 <code>/ws/tts?key=&lt;密钥&gt;</code>。",
         authHint: "诚实边界：同源免密基于 Origin/Referer 头，非浏览器客户端可伪造。真正的网络隔离仍建议由反向代理（Caddy）兜底；此处密钥用于为外部集成提供受控接入能力。",
         authCode: "# CRX 插件调用示例（外部客户端，需带密钥）\nfetch(\"https://tts.example.com/api/tts\", {\n  method: \"POST\",\n  headers: {\n    \"Content-Type\": \"application/json\",\n    \"X-API-Key\": \"YOUR_SECRET_KEY\"\n  },\n  body: JSON.stringify({ text: \"你好\", engine: \"kokoro\", voice: \"zf_xiaoxiao\", speed: 1.0 })\n});",
@@ -430,6 +454,13 @@ const I18N = {
         ttsResp503: "引擎未就绪",
         ttsResp504: "首段音频就绪前合成超时",
         ttsDownloadLabel: "作为附件下载",
+        openaiDesc: "供 OpenAI SDK、Hermes、OpenClaw 等客户端使用的二进制语音兼容端点。将客户端 base URL 设为 <code>http://&lt;host&gt;:8880/v1</code>。",
+        openaiAuth: "<strong>鉴权</strong>：配置 <code>TTS_API_KEY</code> 后必须发送 Bearer 或 <code>X-API-Key</code>；伪造同源头也不能绕过 <code>/v1</code>。",
+        openaiFormats: "<strong>格式</strong>：<code>mp3</code>、<code>opus</code>、<code>aac</code>、<code>flac</code>、<code>wav</code>，以及 raw 24 kHz 单声道 s16le <code>pcm</code>；MIME 与文件扩展名跟随请求格式。",
+        openaiVoices: "<strong>音色</strong>：所选 model 对应引擎的真实 ID，或包括 <code>coral</code> 在内的七个别名。Kokoro ID 必须同时显式设置 <code>model:&quot;kokoro&quot;</code>。<code>alloy</code>/<code>coral</code> 使用成年 Edge 女声 Ava；真实 Ana 仍可按 ID 手选。",
+        openaiKokoroScripts: "<strong>Kokoro 脚本</strong>：英文音色只允许 Latin 字母，中文音色只允许 Han 汉字；其他 Unicode 字母脚本在合成前返回 <code>422</code>。数字、标点、空白和组合附加符号不决定脚本。",
+        openaiBoundaries: "<strong>明确边界</strong>：SSE、非空 <code>instructions</code>、<code>lang_code</code>/<code>lang</code>/<code>language</code>、仅见于指南示例的 <code>format</code> 别名与 custom voice 对象尚未实现，会返回 <code>400</code>/<code>422</code>。",
+        openaiMore: "<strong>完整契约</strong>：错误形状、格式表、model 回退、发现接口子集差异与客户端矩阵见仓库 <code>API.md</code> 和兼容性审计文档。",
         wsDesc: "交互式 TTS 会话。发送 JSON 请求，接收二进制 PCM 帧与 JSON 控制消息交错的流。连接在一次请求完成后保持打开，可继续发下一个请求。",
         wsC2S: "客户端 → 服务端",
         wsC2SNote: "用 <code>\\n</code> 分隔句子——服务端以此为合成单元，段边界 1:1 对齐，实现无缝流式播放。<code>speed</code> 服务端会钳制到 <code>0.5</code>–<code>3.0</code>。",
@@ -442,7 +473,7 @@ const I18N = {
         wsMsgError: "请求被拒或合成失败，连接保持打开",
         wsErrorDesc: "<code>error</code> 覆盖：非法 JSON、缺失/空 <code>text</code>、文本超长、未知 <code>engine</code>、未知 Kokoro <code>voice</code>、合成失败（如非法 Edge 音色或引擎故障）。合成失败时服务端发 <code>error</code> 而非 <code>end</code>，客户端据此脱离「合成中」状态，不伪装成功。",
         wsCancelTitle: "取消 / 打断",
-        wsCancelDesc: "合成期间，客户端发送任意消息（或关闭连接）即可取消当前请求。服务端立即停止合成并开始监听下一个请求。",
+        wsCancelDesc: "合成期间，客户端发送任意消息（或关闭连接）即可取消当前请求。该信号会立即唤醒 Edge I/O 与排队中的 Kokoro 请求；排队请求无需等到取得合成槽位。这不表示资源回收也瞬间完成：服务端仍会等待 Edge 解码器进程退出，或等待已运行的 Kokoro 推理在下一个生成块边界协作停止并完成清理，然后才开始监听下一请求。",
         wsAutoTitle: "Auto 引擎",
         wsAutoDesc: "<code>\"engine\":\"auto\"</code> 是<strong>纯前端 UI 选项</strong>，从不发往服务端。选中 Auto 时，浏览器按句与语言边界切分：中文（含中文标点）路由到中文音色，英文（含单个术语/全大写缩写如 <code>DNS</code>、<code>OpenWrt</code>）一律路由到英文音色。Kokoro 每个 pipeline 单语言，中文 pipeline 连孤立英文缩写都读不出（官方 issue #95/#238），故绝不把英文合并进中文段。",
         wsPrepTitle: "文本预处理",

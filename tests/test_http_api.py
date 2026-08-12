@@ -3,10 +3,12 @@
 import unittest
 import os
 import shutil
+import io
+import logging
 
 from starlette.testclient import TestClient
 
-from _support import FakeProc, ScriptedStdout, import_app_with_fakes
+from _support import FakeProc, HangingStdout, ScriptedStdout, import_app_with_fakes
 
 
 def _load_with_cors(origins):
@@ -39,7 +41,9 @@ class HttpApiTests(unittest.TestCase):
         async def fake_encoder(engine):
             return FakeProc(stdout=ScriptedStdout([content]))
 
-        async def fake_run_kokoro(text, voice, speed, cancel_event=None):
+        async def fake_run_kokoro(
+            text, voice, speed, cancel_event=None, permit=None
+        ):
             return b"\x01\x02\x03\x04"
 
         self.app._create_mp3_encoder = fake_encoder
@@ -61,7 +65,7 @@ class HttpApiTests(unittest.TestCase):
 
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
-        self.assertEqual(body["status"], "v0.11 engine running")
+        self.assertEqual(body["status"], "v0.12 engine running")
         self.assertTrue(body["ready"])
         self.assertEqual(body["max_text_length"], self.app.MAX_TEXT_LENGTH)
 
@@ -85,7 +89,7 @@ class HttpApiTests(unittest.TestCase):
 
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
-        self.assertEqual(body["status"], "v0.11 engine running")
+        self.assertEqual(body["status"], "v0.12 engine running")
         self.assertTrue(body["ready"])
         self.assertEqual(body["max_text_length"], self.app.MAX_TEXT_LENGTH)
 
@@ -133,6 +137,21 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 401)
         self.assertNotIn("access-control-allow-origin", resp.headers)
 
+    def test_non_ascii_api_key_is_auth_failure_not_500(self):
+        self.app.TTS_API_KEY = "密钥"
+        client = TestClient(self.app.app, raise_server_exceptions=False)
+        resp = client.get("/api/voices", headers={"X-API-Key": "wrong"})
+        self.assertEqual(resp.status_code, 401)
+
+    def test_malformed_host_does_not_raise_server_error(self):
+        self.app.TTS_API_KEY = "secret"
+        client = TestClient(self.app.app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/voices",
+            headers={"Host": "[", "X-API-Key": "secret"},
+        )
+        self.assertNotEqual(resp.status_code, 500)
+
     def test_logs_endpoint_requires_real_key_even_for_same_origin(self):
         self.app.TTS_API_KEY = "secret"
 
@@ -159,6 +178,76 @@ class HttpApiTests(unittest.TestCase):
         self.assertIn("second line", rendered)
         self.assertIn("[REDACTED]", rendered)
         self.assertNotIn("secret", rendered)
+
+    def test_ring_buffer_sanitizes_records_and_enforces_total_budget(self):
+        handler = self.app.RingBufferHandler(max_lines=10, max_chars=64)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        handler._stream = logging.StreamHandler(io.StringIO())
+
+        for message in ("x" * 48, "bad\nFORGED\ud800" + "y" * 48):
+            record = logging.LogRecord(
+                "test", logging.ERROR, __file__, 1, message, (), None
+            )
+            handler.handle(record)
+
+        lines = list(handler.buffer)
+        self.assertLessEqual(sum(len(line) for line in lines), 64)
+        self.assertTrue(lines)
+        self.assertTrue(all("\n" not in line and "\ud800" not in line for line in lines))
+        stream_lines = handler._stream.stream.getvalue().splitlines()
+        self.assertEqual(len(stream_lines), 2)
+        self.assertTrue(all("\ud800" not in line for line in stream_lines))
+        self.assertIn("\\u000a", stream_lines[1])
+
+    def test_ring_buffer_escapes_unicode_line_separators(self):
+        handler = self.app.RingBufferHandler(max_lines=10)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        handler._stream = logging.StreamHandler(io.StringIO())
+        record = logging.LogRecord(
+            "test", logging.ERROR, __file__, 1, "A\u2028B\u2029C", (), None
+        )
+
+        handler.handle(record)
+
+        line = list(handler.buffer)[0]
+        self.assertNotIn("\u2028", line)
+        self.assertNotIn("\u2029", line)
+        self.assertIn("\\u2028", line)
+        self.assertIn("\\u2029", line)
+        rendered = handler._stream.stream.getvalue()
+        self.assertNotIn("\u2028", rendered)
+        self.assertNotIn("\u2029", rendered)
+
+    def test_logs_endpoint_escapes_raw_unicode_line_separators_at_boundary(self):
+        self.app.TTS_API_KEY = ""
+        self.app._ring_handler.buffer.clear()
+        self.app._ring_handler.buffer.append("A\u2028B\u2029C")
+
+        resp = self.client.get("/api/logs")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn(b"\xe2\x80\xa8", resp.content)
+        self.assertNotIn(b"\xe2\x80\xa9", resp.content)
+        line = resp.json()["lines"][0]
+        self.assertNotIn("\u2028", line)
+        self.assertNotIn("\u2029", line)
+        self.assertIn("\\u2028", line)
+        self.assertIn("\\u2029", line)
+
+    def test_logs_endpoint_sanitizes_before_redacting_bearer_value(self):
+        self.app.TTS_API_KEY = ""
+        self.app._ring_handler.buffer.clear()
+        self.app._ring_handler.buffer.append(
+            "Authorization: Bearer secret\u2028continuation"
+        )
+
+        resp = self.client.get("/api/logs")
+
+        self.assertEqual(resp.status_code, 200)
+        line = resp.json()["lines"][0]
+        self.assertIn("Authorization: Bearer [REDACTED]", line)
+        self.assertNotIn("secret", line)
+        self.assertNotIn("continuation", line)
 
     def test_logs_endpoint_rejects_invalid_limit(self):
         for limit in ("0", str(self.app.LOG_MAX_LINES + 1)):
@@ -271,7 +360,9 @@ class HttpApiTests(unittest.TestCase):
         async def fake_encoder(engine):
             return FakeProc(stdout=ScriptedStdout([]))
 
-        async def fake_run_kokoro(text, voice, speed, cancel_event=None):
+        async def fake_run_kokoro(
+            text, voice, speed, cancel_event=None, permit=None
+        ):
             raise RuntimeError("kokoro boom")
 
         self.app._create_mp3_encoder = fake_encoder
@@ -348,6 +439,40 @@ class HttpApiTests(unittest.TestCase):
 
         self.assertEqual(resp.status_code, 422)
 
+    def test_legacy_edge_rejects_blank_voice_before_synthesis(self):
+        self._mark_ready()
+        called = False
+
+        async def fake_encoder(engine):
+            nonlocal called
+            called = True
+            return FakeProc(stdout=ScriptedStdout([b"MP3DATA"]))
+
+        self.app._create_mp3_encoder = fake_encoder
+        resp = self.client.post(
+            "/api/tts",
+            json={"text": "hello", "engine": "edge", "voice": "   "},
+        )
+        self.assertEqual(resp.status_code, 422)
+        self.assertFalse(called)
+
+    def test_edge_preview_rejects_blank_voice_before_synthesis(self):
+        self._mark_ready()
+        called = False
+
+        async def fake_encoder(engine):
+            nonlocal called
+            called = True
+            return FakeProc(stdout=ScriptedStdout([b"MP3DATA"]))
+
+        self.app._create_mp3_encoder = fake_encoder
+        resp = self.client.get(
+            "/api/voices/preview",
+            params={"engine": "edge", "voice": "   "},
+        )
+        self.assertEqual(resp.status_code, 422)
+        self.assertFalse(called)
+
     def test_kokoro_rejects_ssml(self):
         self._mark_ready()
 
@@ -391,7 +516,9 @@ class HttpApiTests(unittest.TestCase):
         async def fake_encoder(engine):
             return FakeProc(stdout=ScriptedStdout([b"SHOULD_NOT_MATTER"]))
 
-        async def fake_run_kokoro(text, voice, speed, cancel_event=None):
+        async def fake_run_kokoro(
+            text, voice, speed, cancel_event=None, permit=None
+        ):
             return b""
 
         self.app._create_mp3_encoder = fake_encoder
@@ -410,7 +537,9 @@ class HttpApiTests(unittest.TestCase):
         async def fake_encoder(engine):
             return FakeProc(stdout=ScriptedStdout([]))
 
-        async def fake_run_kokoro(text, voice, speed, cancel_event=None):
+        async def fake_run_kokoro(
+            text, voice, speed, cancel_event=None, permit=None
+        ):
             raise RuntimeError("kokoro boom")
 
         self.app._create_mp3_encoder = fake_encoder
@@ -427,7 +556,8 @@ class HttpApiTests(unittest.TestCase):
         self._mark_ready()
 
         async def fake_encoder(engine):
-            return FakeProc(stdout=ScriptedStdout([]))
+            # 保持本地编码器可等待，只隔离验证 Edge 上游失败的 502 分类。
+            return FakeProc(stdout=HangingStdout())
 
         class BoomCommunicate:
             def __init__(self, *args, **kwargs):

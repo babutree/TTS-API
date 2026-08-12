@@ -458,7 +458,7 @@ function engineOfVoice(voice) {
 function splitSentences(text) {
     return text
         .split(/(?<=[.!?。！？]) +|(?<=[。！？])|\n+/)
-        .map(s => s.trim())
+        .map(pythonStrip)
         .filter(Boolean);
 }
 
@@ -466,24 +466,39 @@ function splitSentences(text) {
 // DNS 这类孤立英文缩写都读错(官方 lang_code 必须匹配 voice)。故绝不把英文合并进中文段，
 // 一律按语言路由到对应音色——英文(含术语/缩写)全部走英文音色。非字母(标点/空格/数字)
 // 归并到前一段，保持标点与语流。返回 [{ text, isZh }]，相邻同语言已合并。
+// 前后端共享的 Unicode 15.0 已分配 Han 分段，不依赖 Python 运行时 UCD 版本。
+// 不要把区段之间的未分配空洞或区间尾部也路由到中文音色。
+const HAN_CHAR_RE = /[\u3007\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufa6d\ufa70-\ufad9\u{20000}-\u{2a6df}\u{2a700}-\u{2b739}\u{2b740}-\u{2b81d}\u{2b820}-\u{2cea1}\u{2ceb0}-\u{2ebe0}\u{2f800}-\u{2fa1d}\u{30000}-\u{3134a}\u{31350}-\u{323af}]/u;
+const UNICODE_LETTER_RE = /\p{L}/u;
+
+// Python str.strip() 的 Unicode 15 空白集合。不能使用 JS trim()：后者不删
+// U+0085，却会删除 Python 保留的 U+FEFF，导致 UI 与服务端请求门禁不一致。
+const PYTHON_STRIP_EDGE_RE = /^[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/gu;
+
+function pythonStrip(value) {
+    return String(value).replace(PYTHON_STRIP_EDGE_RE, "");
+}
+
 function splitByLanguage(text) {
     const segs = [];
     let cur = '';
     let curZh = null;
     for (const ch of text) {
-        const isLetter = /[\u4e00-\u9fffA-Za-z]/.test(ch);
+        const isZh = HAN_CHAR_RE.test(ch);
+        const isLetter = isZh || UNICODE_LETTER_RE.test(ch);
         if (!isLetter) { cur += ch; continue; }
-        const isZh = /[\u4e00-\u9fff]/.test(ch);
         if (curZh === null || isZh === curZh) {
             curZh = isZh;
             cur += ch;
         } else {
-            if (cur.trim()) segs.push({ text: cur.trim(), isZh: curZh });
+            const cleaned = pythonStrip(cur);
+            if (cleaned) segs.push({ text: cleaned, isZh: curZh });
             cur = ch;
             curZh = isZh;
         }
     }
-    if (cur.trim()) segs.push({ text: cur.trim(), isZh: curZh ?? false });
+    const cleaned = pythonStrip(cur);
+    if (cleaned) segs.push({ text: cleaned, isZh: curZh ?? false });
 
     // 合并相邻同语言段(切分过程中非字母字符可能造成同语言相邻)
     const merged = [];
@@ -508,9 +523,22 @@ function defaultKokoroVoice(isZh) {
 
 // 合成用文本：超限时截到 maxTextLength，仅播放未超出部分(输入框全文保留，高亮示超限起点)。
 // 前端体验：不阻断朗读；后端 REST/WS 仍按单次请求校验 MAX_TEXT_LENGTH。
+function codePoints(text) {
+    return Array.from(String(text));
+}
+
+function codePointLength(text) {
+    let count = 0;
+    for (const _ of String(text)) count += 1;
+    return count;
+}
+
 function textForSynthesis() {
     const raw = textArea.value;
-    return raw.length > maxTextLength ? raw.slice(0, maxTextLength) : raw;
+    const points = codePoints(raw);
+    return points.length > maxTextLength
+        ? points.slice(0, maxTextLength).join("")
+        : raw;
 }
 
 // 把整篇文本解析为句级列表，每句标注目标 (engine, voice)。单一事实源。
@@ -831,7 +859,7 @@ function escapeHtml(s) {
 }
 
 function isTextOverLimit() {
-    return textArea.value.length > maxTextLength;
+    return codePointLength(textArea.value) > maxTextLength;
 }
 
 function syncTextHighlightScroll() {
@@ -843,19 +871,20 @@ function updateTextHighlight() {
     if (!textHighlight) return;
     const raw = textArea.value;
     const limit = maxTextLength;
-    if (raw.length <= limit) {
+    const points = codePoints(raw);
+    if (points.length <= limit) {
         textHighlight.innerHTML = escapeHtml(raw);
     } else {
         // 从第 limit+1 字起标红底：可见「从哪里开始超出」
         textHighlight.innerHTML =
-            escapeHtml(raw.slice(0, limit)) +
-            '<mark class="text-over">' + escapeHtml(raw.slice(limit)) + "</mark>";
+            escapeHtml(points.slice(0, limit).join("")) +
+            '<mark class="text-over">' + escapeHtml(points.slice(limit).join("")) + "</mark>";
     }
     syncTextHighlightScroll();
 }
 
 function updateCharCount() {
-    const n = textArea.value.length;
+    const n = codePointLength(textArea.value);
     const limit = maxTextLength;
     const over = n > limit;
     if (over) {
@@ -988,6 +1017,10 @@ let runIndex = 0;
 const PREFETCH_AHEAD = 2;
 const PREFETCH_WAIT_GRACE_MS = 1500;
 const WS_INACTIVITY_TIMEOUT_MS = 60000;
+// 仅约束尚未成为 current 的 PCM：单槽最多 20 秒、所有 future 槽合计最多 30 秒。
+// promotion 后音频立即进入主 buffer，不再计入投机缓存预算。
+const PREFETCH_MAX_STATE_BUFFERED_SAMPLES = SAMPLE_RATE * 20;
+const PREFETCH_MAX_BUFFERED_SAMPLES = SAMPLE_RATE * 30;
 const prefetchMap = new Map(); // runIndex → { ws, runIndex, chunks, ended, error, sampleCount, segOffsets }
 const prefetchWaitTimers = new WeakMap(); // state → 当前成为消费阻塞点后启动的 deadline timer
 const prefetchInactivityTimers = new WeakMap(); // state → 最近一次有效 WS 活动后的静默 deadline
@@ -1197,6 +1230,23 @@ function hasCommittedPrefetchAudio(state) {
     return Boolean(meta && meta.committedAudio);
 }
 
+function isUncommittedFuturePrefetch(state) {
+    return Boolean(
+        state
+        && state.runIndex !== runIndex
+        && !state.error
+        && !hasCommittedPrefetchAudio(state)
+    );
+}
+
+function bufferedFuturePrefetchSamples() {
+    let total = 0;
+    for (const state of prefetchMap.values()) {
+        if (isUncommittedFuturePrefetch(state)) total += state.sampleCount;
+    }
+    return total;
+}
+
 // 未来槽仍只缓存；轮到 current run 后，把已有及后续 PCM 立即交给主播放 buffer，
 // 不再等待整段 end。baseSample 固定为 promotion 时的 writePos，segOffsets 仍按 run
 // 相对样本位移恢复 timeline。WeakMap 元数据避免改变既有 state 公共形状。
@@ -1308,8 +1358,24 @@ function beginPrefetch(targetRunIndex) {
         if (prefetchMap.get(targetRunIndex) !== state) return;
         if (state.ended || state.error) return;
         if (typeof e.data !== "string") {
+            const len = Math.floor(e.data.byteLength / 2);
+            if (
+                isUncommittedFuturePrefetch(state)
+                && (
+                    state.sampleCount + len > PREFETCH_MAX_STATE_BUFFERED_SAMPLES
+                    || bufferedFuturePrefetchSamples() + len > PREFETCH_MAX_BUFFERED_SAMPLES
+                )
+            ) {
+                // 音频尚未进入主 buffer，可安全丢弃并保留 error tombstone；
+                // 轮到该 run 时按序走主 WS fallback，绝不重放已提交 PCM。
+                state.chunks = [];
+                state.segOffsets = [];
+                state.sampleCount = 0;
+                settle(true);
+                closePrefetchState(state);
+                return;
+            }
             const dv = new DataView(e.data);
-            const len = e.data.byteLength >> 1;
             if (len > 0) touchInactivity();
             const f32 = new Float32Array(len);
             for (let i = 0; i < len; i++) f32[i] = dv.getInt16(i * 2, true) / 32768;

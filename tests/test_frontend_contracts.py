@@ -2617,6 +2617,153 @@ globalThis.AudioContext = class {
         run_node_contract("index.html", PREFETCH_CONTROLLED_SETUP, assertions)
 
 
+class UnicodeBoundaryContractTests(unittest.TestCase):
+    def test_text_limit_counts_astral_code_points_without_splitting_surrogate(self):
+        setup = r"""
+globalThis.fetch = async (url) => {
+  if (String(url) === '/' || String(url).endsWith('/')) {
+    return { ok: true, json: async () => ({ status: 'ok', ready: true, max_text_length: 1 }) };
+  }
+  return { ok: true, json: async () => ({ kokoro: [], edge: [] }) };
+};
+document.getElementById('engine').value = 'edge';
+"""
+        assertions = r"""
+(async () => {
+  await loadTextLimit();
+  const ta = document.getElementById('t');
+  ta.value = '😀';
+  equal(textForSynthesis(), '😀', 'astral character remains intact at one-character limit');
+  equal(isTextOverLimit(), false, 'one astral code point is within the one-character limit');
+  updateCharCount();
+  assertOk(document.getElementById('charCount').textContent.startsWith('1 '), 'counter uses code points');
+
+  ta.value = '😀x';
+  equal(textForSynthesis(), '😀', 'truncation keeps the complete astral code point');
+  equal(isTextOverLimit(), true, 'two code points exceed the one-character limit');
+  updateCharCount();
+  assertOk(document.getElementById('charCount').textContent.startsWith('2 / 1'), 'over-limit counter uses code points');
+  equal(
+    document.getElementById('textHighlight').innerHTML,
+    '😀<mark class="text-over">x</mark>',
+    'highlight boundary follows code points'
+  );
+  finish();
+})().catch(err => { throw err; });
+"""
+        run_node_contract('index.html', setup, assertions)
+
+    def test_auto_routes_cjk_extension_and_astral_han_to_chinese_voice(self):
+        setup = r"""
+globalThis.fetch = async () => ({ ok: true, json: async () => ({
+  kokoro: [
+    { id: 'zf_xiaoxiao', name: 'Xiaoxiao', gender: 'female', language: 'zh' },
+    { id: 'af_heart', name: 'Heart', gender: 'female', language: 'en' },
+  ],
+  edge: [],
+}) });
+document.getElementById('engine').value = 'auto';
+"""
+        assertions = r"""
+(async () => {
+  await voicesPromise;
+  updateVoices();
+  document.getElementById('voiceZh').value = 'zf_xiaoxiao';
+  document.getElementById('voiceEnAuto').value = 'af_heart';
+  document.getElementById('t').value = '㐀𠀀';
+  deepEqual(computeSentences(), [{ engine: 'kokoro', voice: 'zf_xiaoxiao', text: '㐀𠀀' }], 'extended Han routes as Chinese');
+  finish();
+})().catch(err => { throw err; });
+"""
+        run_node_contract('index.html', setup, assertions)
+
+    def test_auto_does_not_route_unicode_15_unassigned_han_gap_to_chinese(self):
+        setup = r"""
+globalThis.fetch = async () => ({ ok: true, json: async () => ({
+  kokoro: [
+    { id: 'zf_xiaoxiao', name: 'Xiaoxiao', gender: 'female', language: 'zh' },
+    { id: 'af_heart', name: 'Heart', gender: 'female', language: 'en' },
+  ],
+  edge: [],
+}) });
+document.getElementById('engine').value = 'auto';
+"""
+        assertions = r"""
+(async () => {
+  await voicesPromise;
+  updateVoices();
+  document.getElementById('voiceZh').value = 'zf_xiaoxiao';
+  document.getElementById('voiceEnAuto').value = 'af_heart';
+  document.getElementById('t').value = '\u{2EBF0}';
+  deepEqual(
+    computeSentences(),
+    [{ engine: 'kokoro', voice: 'af_heart', text: '\u{2EBF0}' }],
+    'a code point outside the shared Unicode 15 Han table is not Chinese Han'
+  );
+  finish();
+})().catch(err => { throw err; });
+"""
+        run_node_contract('index.html', setup, assertions)
+
+    def test_auto_does_not_route_unicode_15_unassigned_han_tail_to_chinese(self):
+        setup = r"""
+globalThis.fetch = async () => ({ ok: true, json: async () => ({
+  kokoro: [
+    { id: 'zf_xiaoxiao', name: 'Xiaoxiao', gender: 'female', language: 'zh' },
+    { id: 'af_heart', name: 'Heart', gender: 'female', language: 'en' },
+  ],
+  edge: [],
+}) });
+document.getElementById('engine').value = 'auto';
+"""
+        assertions = r"""
+(async () => {
+  await voicesPromise;
+  updateVoices();
+  document.getElementById('voiceZh').value = 'zf_xiaoxiao';
+  document.getElementById('voiceEnAuto').value = 'af_heart';
+  document.getElementById('t').value = '\u{2CEA2}';
+  deepEqual(
+    computeSentences(),
+    [{ engine: 'kokoro', voice: 'af_heart', text: '\u{2CEA2}' }],
+    'an unassigned Han-range tail is not Chinese Han'
+  );
+  finish();
+})().catch(err => { throw err; });
+"""
+        run_node_contract('index.html', setup, assertions)
+
+    def test_ui_blankness_matches_python_strip(self):
+        setup = r"""
+globalThis.fetch = async () => ({ ok: true, json: async () => ({
+  kokoro: [],
+  edge: [
+    { id: 'en-US-AvaMultilingualNeural', name: 'Ava', gender: 'Female', locale: 'en-US' },
+  ],
+}) });
+document.getElementById('engine').value = 'edge';
+"""
+        assertions = r"""
+(async () => {
+  await voicesPromise;
+  updateVoices();
+  document.getElementById('voice').value = 'en-US-AvaMultilingualNeural';
+
+  document.getElementById('t').value = '\u0085';
+  deepEqual(computeSentences(), [], 'U+0085 is blank under Python str.strip');
+
+  document.getElementById('t').value = '\uFEFF';
+  deepEqual(
+    computeSentences(),
+    [{ engine: 'edge', voice: 'en-US-AvaMultilingualNeural', text: '\uFEFF' }],
+    'U+FEFF is retained because Python str.strip retains it'
+  );
+  finish();
+})().catch(err => { throw err; });
+"""
+        run_node_contract('index.html', setup, assertions)
+
+
 class SchedulerThrottleContractTests(unittest.TestCase):
     """播放调度器节流契约(A3)：pump 前瞻式节流 + ticker 生命周期。
 

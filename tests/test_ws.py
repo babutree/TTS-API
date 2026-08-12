@@ -37,14 +37,18 @@ def _load(key: str = ""):
 
 
 def _install_kokoro_pcm(app, pcm: bytes):
-    async def fake_run_kokoro(text, voice, speed, cancel_event=None):
+    async def fake_run_kokoro(
+        text, voice, speed, cancel_event=None, permit=None
+    ):
         return pcm
 
     app.run_kokoro = fake_run_kokoro
 
 
 def _install_kokoro_boom(app, error):
-    async def fake_run_kokoro(text, voice, speed, cancel_event=None):
+    async def fake_run_kokoro(
+        text, voice, speed, cancel_event=None, permit=None
+    ):
         raise error
 
     app.run_kokoro = fake_run_kokoro
@@ -75,7 +79,7 @@ def _collect_until_terminal(ws):
 class WsHandshakeAuthTests(unittest.TestCase):
     def test_no_key_allows_connection(self):
         app = _load(key="")
-        _install_kokoro_pcm(app, b"")
+        _install_kokoro_pcm(app, b"\x01\x02")
         client = TestClient(app.app)
         with client.websocket_connect("/ws/tts") as ws:
             ws.send_json({"text": "hi", "engine": "kokoro", "voice": "af_heart"})
@@ -84,7 +88,7 @@ class WsHandshakeAuthTests(unittest.TestCase):
 
     def test_same_origin_allowed_without_key(self):
         app = _load(key="secret")
-        _install_kokoro_pcm(app, b"")
+        _install_kokoro_pcm(app, b"\x01\x02")
         client = TestClient(app.app)
         with client.websocket_connect(
             "/ws/tts", headers={"Origin": "http://testserver"}
@@ -106,7 +110,7 @@ class WsHandshakeAuthTests(unittest.TestCase):
 
     def test_external_with_query_key_allowed(self):
         app = _load(key="secret")
-        _install_kokoro_pcm(app, b"")
+        _install_kokoro_pcm(app, b"\x01\x02")
         client = TestClient(app.app)
         with client.websocket_connect(
             "/ws/tts?key=secret", headers={"Origin": "http://evil.com"}
@@ -126,11 +130,30 @@ class WsHandshakeAuthTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.code, 1008)
 
+    def test_non_ascii_query_key_is_rejected_as_policy_violation(self):
+        app = _load(key="secret")
+        client = TestClient(app.app)
+        with self.assertRaises(WebSocketDisconnect) as ctx:
+            with client.websocket_connect("/ws/tts?key=%E5%AF%86%E9%92%A5") as ws:
+                ws.receive()
+        self.assertEqual(ctx.exception.code, 1008)
+
+    def test_valid_key_takes_priority_over_malformed_origin(self):
+        app = _load(key="secret")
+        _install_kokoro_pcm(app, b"\x01\x02")
+        client = TestClient(app.app)
+        with client.websocket_connect(
+            "/ws/tts?key=secret", headers={"Origin": "http://["}
+        ) as ws:
+            ws.send_json({"text": "hi", "engine": "kokoro", "voice": "af_heart"})
+            _, terminal = _collect_until_terminal(ws)
+        self.assertEqual(terminal, "end")
+
 
 class WsRequestValidationTests(unittest.TestCase):
     def setUp(self):
         self.app = _load(key="")
-        _install_kokoro_pcm(self.app, b"")
+        _install_kokoro_pcm(self.app, b"\x01\x02")
         self.client = TestClient(self.app.app)
 
     def test_invalid_json_returns_error_and_keeps_alive(self):
@@ -170,6 +193,33 @@ class WsRequestValidationTests(unittest.TestCase):
             msg = ws.receive_json()
             self.assertEqual(msg["type"], "error")
 
+    def test_non_object_json_returns_error_and_keeps_alive(self):
+        for value in ([], None, 1, "text"):
+            with self.subTest(value=value):
+                with self.client.websocket_connect("/ws/tts") as ws:
+                    ws.send_json(value)
+                    self.assertEqual(ws.receive_json()["type"], "error")
+                    ws.send_json({"text": "hi", "engine": "kokoro", "voice": "af_heart"})
+                    _, terminal = _collect_until_terminal(ws)
+                    self.assertEqual(terminal, "end")
+
+    def test_object_voice_types_return_error_and_keep_alive(self):
+        for engine, voice in (("kokoro", {"id": "af_heart"}), ("edge", ["voice"])):
+            with self.subTest(engine=engine):
+                with self.client.websocket_connect("/ws/tts") as ws:
+                    ws.send_json({"text": "hi", "engine": engine, "voice": voice})
+                    self.assertEqual(ws.receive_json()["type"], "error")
+                    ws.send_json({"text": "hi", "engine": "kokoro", "voice": "af_heart"})
+                    _, terminal = _collect_until_terminal(ws)
+                    self.assertEqual(terminal, "end")
+
+    def test_binary_frame_is_explicitly_rejected(self):
+        with self.client.websocket_connect("/ws/tts") as ws:
+            ws.send_bytes(b'{"text":"hi"}')
+            event = ws.receive()
+            self.assertEqual(event.get("type"), "websocket.close")
+            self.assertEqual(event.get("code"), 1003)
+
 
 class WsSynthesisFlowTests(unittest.TestCase):
     def test_prefetch_query_marks_edge_synthesis_low_priority(self):
@@ -193,6 +243,41 @@ class WsSynthesisFlowTests(unittest.TestCase):
         self.assertEqual(second_terminal, "end")
         self.assertEqual(prefetch_flags, [True, False])
 
+    def test_prefetch_query_marks_kokoro_synthesis_low_priority(self):
+        app = _load(key="")
+        prefetch_flags = []
+
+        async def fake_synth_kokoro(
+            units,
+            voice,
+            speed,
+            queue,
+            ws,
+            cancel_event,
+            prefetch=False,
+        ):
+            prefetch_flags.append(prefetch)
+            await queue.put({"type": "seg", "text": units[0]})
+            await queue.put(b"\x00\x00")
+            return True
+
+        app.synth_kokoro = fake_synth_kokoro
+        client = TestClient(app.app)
+        with client.websocket_connect("/ws/tts?prefetch=1") as ws:
+            ws.send_json(
+                {"text": "first", "engine": "kokoro", "voice": "af_heart"}
+            )
+            _, first_terminal = _collect_until_terminal(ws)
+        with client.websocket_connect("/ws/tts") as ws:
+            ws.send_json(
+                {"text": "second", "engine": "kokoro", "voice": "af_heart"}
+            )
+            _, second_terminal = _collect_until_terminal(ws)
+
+        self.assertEqual(first_terminal, "end")
+        self.assertEqual(second_terminal, "end")
+        self.assertEqual(prefetch_flags, [True, False])
+
     def test_happy_path_emits_start_seg_audio_end(self):
         app = _load(key="")
         _install_kokoro_pcm(app, b"\x01\x02\x03\x04")
@@ -205,8 +290,8 @@ class WsSynthesisFlowTests(unittest.TestCase):
         self.assertTrue(any(kind == "bin" for kind, _ in seq))
         self.assertEqual(terminal, "end")
 
-    def test_empty_pcm_still_emits_seg_and_end(self):
-        # 清洗后有内容但合成零音频(如纯英文配英文音色被过滤空)：仍发 seg 与 end，不发二进制帧。
+    def test_empty_pcm_returns_error_not_end(self):
+        # 非空 run 合成零音频不是成功；必须暴露 error，不能用 end 伪装完成。
         app = _load(key="")
         _install_kokoro_pcm(app, b"")
         client = TestClient(app.app)
@@ -216,7 +301,8 @@ class WsSynthesisFlowTests(unittest.TestCase):
         self.assertEqual(seq[0], ("json", "start"))
         self.assertIn(("json", "seg"), seq)
         self.assertFalse(any(kind == "bin" for kind, _ in seq))
-        self.assertEqual(terminal, "end")
+        self.assertEqual(terminal, "error")
+        self.assertNotIn(("json", "end"), seq)
 
     def test_synth_exception_returns_error_not_end(self):
         app = _load(key="")
@@ -236,7 +322,9 @@ class WsSynthesisFlowTests(unittest.TestCase):
         app = _load(key="")
         app.TTS_SYNTHESIS_TIMEOUT_SECONDS = 0.01
 
-        async def slow_run_kokoro(text, voice, speed, cancel_event=None):
+        async def slow_run_kokoro(
+            text, voice, speed, cancel_event=None, permit=None
+        ):
             while not cancel_event.is_set():
                 await app.asyncio.sleep(0.01)
             return b""
@@ -260,7 +348,9 @@ class WsSynthesisFlowTests(unittest.TestCase):
         app = _load(key="")
         calls = 0
 
-        async def flaky_run_kokoro(text, voice, speed, cancel_event=None):
+        async def flaky_run_kokoro(
+            text, voice, speed, cancel_event=None, permit=None
+        ):
             nonlocal calls
             calls += 1
             if calls == 1:

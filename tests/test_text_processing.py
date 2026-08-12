@@ -45,6 +45,53 @@ class CleanTextTests(unittest.TestCase):
     def test_stray_unclosed_stars_removed(self):
         self.assertEqual(app.clean_text("broken **unclosed here"), "broken unclosed here")
 
+    def test_multiplication_stars_are_preserved(self):
+        self.assertEqual(app.clean_text("2*3*4"), "2*3*4")
+        self.assertEqual(app.clean_text("2**8"), "2**8")
+
+    def test_word_internal_stars_and_unicode_multiplication_are_preserved(self):
+        # 词内星号是运算符/标识符的一部分，不应被 Markdown 清洗静默吞掉。
+        for source in ("2**8**2", "a**b**c", "α*β*γ", "甲*乙*丙"):
+            with self.subTest(source=source):
+                self.assertEqual(app.clean_text(source), source)
+
+    def test_double_stars_only_preserve_complete_ascii_power_chains(self):
+        # ** 在纯文本中既可能是 Markdown，也可能是 Python 风格乘方。
+        # 仅完整 ASCII 乘方链按运算符保留，CJK 相邻和混合链按 Markdown
+        # 处理，不能只保住一侧分隔符而静默损坏剩余文本。
+        cases = {
+            "中文**加粗**中文": "中文加粗中文",
+            "abc**重要**def": "abc重要def",
+            "a**b**中文": "ab中文",
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(app.clean_text(source), expected)
+
+    def test_star_ambiguity_tradeoff_faces_are_locked(self):
+        # S2 策略的取舍面必须显式锁定，防止未来"悄悄改策略"：
+        # 1) ASCII 紧邻双星号串会被当作乘方链保留——即使它语义上很像粗体，
+        #    因为无法用语法区分 text**bold**text 与 a**b**c。
+        self.assertEqual(app.clean_text("text**bold**text"), "text**bold**text")
+        # 2) Unicode 字母紧邻的单星号链保留，覆盖中文斜体这一旧版回退面。
+        self.assertEqual(app.clean_text("中文*斜体*中文"), "中文*斜体*中文")
+
+    def test_star_protection_never_rewrites_existing_private_use_text(self):
+        # 实现若使用私用区占位符，用户的原始字符和完整的首选候选串均须
+        # 原样保留；这迫使实现动态避让而非写死 U+E000。
+        for source in (
+            "\ue000 2**8**2",
+            "\ue000clean-text-double-star-0\ue001 2**8**2",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(app.clean_text(source), source)
+
+    def test_bounded_markdown_emphasis_is_still_unwrapped(self):
+        self.assertEqual(app.clean_text("**bold** and *italic*"), "bold and italic")
+        # Markdown 标记可紧贴后续中英文正文；只限制开头不能落在词内。
+        self.assertEqual(app.clean_text("**粗体**文字"), "粗体文字")
+        self.assertEqual(app.clean_text("*italic*word"), "italicword")
+
     def test_strikethrough_unwrapped(self):
         self.assertEqual(app.clean_text("this ~~gone~~ ok"), "this gone ok")
 
@@ -103,8 +150,65 @@ class SplitTextTests(unittest.TestCase):
     def test_whitespace_only_yields_empty_list(self):
         self.assertEqual(app.split_text("   \n  "), [])
 
+    def test_kokoro_internal_split_bounds_and_preserves_original_text(self):
+        original = "alpha beta,gamma delta"
+        splitter = getattr(app, "split_kokoro_unit", None)
+        self.assertIsNotNone(splitter, "Kokoro internal splitter is missing")
+        fragments = splitter(original, 8)
+
+        self.assertTrue(fragments)
+        self.assertTrue(all(0 < len(fragment) <= 8 for fragment in fragments))
+        self.assertEqual("".join(fragments), original)
+
+    def test_kokoro_internal_split_hard_cuts_without_breaking_code_points(self):
+        original = "😀" * 9
+        splitter = getattr(app, "split_kokoro_unit", None)
+        self.assertIsNotNone(splitter, "Kokoro internal splitter is missing")
+        fragments = splitter(original, 4)
+
+        self.assertEqual(fragments, ["😀" * 4, "😀" * 4, "😀"])
+        self.assertEqual("".join(fragments), original)
+
 
 class FilterForVoiceTests(unittest.TestCase):
+    def test_han_classification_is_independent_of_runtime_unicode_database(self):
+        original_name = app.unicodedata.name
+        original_category = app.unicodedata.category
+        app.unicodedata.name = lambda char, default="": default
+        app.unicodedata.category = (
+            lambda char: "Cn"
+            if char == "\U00031350"
+            else original_category(char)
+        )
+        try:
+            self.assertTrue(app._is_han_char("\U00031350"))
+            self.assertTrue(app._is_han_char("\U00030000"))
+            self.assertFalse(app._is_han_char("\U0003134b"))
+            self.assertTrue(app._contains_speakable_text("\U00031350"))
+        finally:
+            app.unicodedata.name = original_name
+            app.unicodedata.category = original_category
+
+    def test_speakable_gate_admits_unicode_letters_and_numbers(self):
+        # 这里只锁定本地 admission；fake/分类通过不代表双语 Kokoro 能正确发音。
+        for text in (
+            "Привет",
+            "かな",
+            "한글",
+            "Ελλάδα",
+            "العربية",
+            "é",
+            "12345",
+        ):
+            with self.subTest(text=text):
+                filtered = app.filter_for_voice(text, False)
+                self.assertEqual(filtered, text)
+                self.assertTrue(app._contains_speakable_text(filtered))
+
+        for text in ("...", "😀", "\u200d"):
+            with self.subTest(symbol_only=text):
+                self.assertFalse(app._contains_speakable_text(text))
+
     def test_chinese_voice_strips_latin_run(self):
         # 你好abc世界 -> 你好 世界(拉丁串整体替换为空格)。
         self.assertEqual(

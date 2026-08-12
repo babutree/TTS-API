@@ -11,7 +11,17 @@ import os
 import unittest
 import warnings
 
-from _support import FakeProc, disable_asyncio_debug, import_app_with_fakes
+import numpy as np
+
+from _support import (
+    FailingEdgeStream,
+    FakeProc,
+    HangingStdout,
+    ScriptedStdout,
+    disable_asyncio_debug,
+    import_app_with_fakes,
+    make_communicate,
+)
 from uvicorn.protocols.http.h11_impl import RequestResponseCycle
 
 warnings.filterwarnings(
@@ -47,6 +57,31 @@ class ConfigParsingTests(unittest.TestCase):
                 os.environ["MAX_TEXT_LENGTH"] = old_value
 
         self.assertEqual(app.MAX_TEXT_LENGTH, 42)
+
+    def test_whitespace_only_api_key_env_fails_fast(self):
+        old_value = os.environ.get("TTS_API_KEY")
+        os.environ["TTS_API_KEY"] = "   "
+        try:
+            with self.assertRaises(ValueError):
+                import_app_with_fakes()
+        finally:
+            if old_value is None:
+                os.environ.pop("TTS_API_KEY", None)
+            else:
+                os.environ["TTS_API_KEY"] = old_value
+
+    def test_explicit_empty_api_key_env_remains_open(self):
+        old_value = os.environ.get("TTS_API_KEY")
+        os.environ["TTS_API_KEY"] = ""
+        try:
+            app = import_app_with_fakes()
+        finally:
+            if old_value is None:
+                os.environ.pop("TTS_API_KEY", None)
+            else:
+                os.environ["TTS_API_KEY"] = old_value
+
+        self.assertEqual(app.TTS_API_KEY, "")
 
     def test_cors_allow_origins_defaults_to_wildcard(self):
         app = import_app_with_fakes()
@@ -178,6 +213,27 @@ class ConfigParsingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.parse_positive_int("0", "TTS_MAX_FFMPEG_PROCESSES", 2)
 
+    def test_kokoro_max_unit_chars_env_defaults_and_validation(self):
+        name = "KOKORO_MAX_UNIT_CHARS"
+        old_value = os.environ.get(name)
+        try:
+            os.environ.pop(name, None)
+            app = import_app_with_fakes()
+            self.assertEqual(app.KOKORO_MAX_UNIT_CHARS, 2000)
+
+            os.environ[name] = "4096"
+            app = import_app_with_fakes()
+            self.assertEqual(app.KOKORO_MAX_UNIT_CHARS, 4096)
+
+            os.environ[name] = "0"
+            with self.assertRaises(ValueError):
+                import_app_with_fakes()
+        finally:
+            if old_value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old_value
+
 
 class AwaitCleanupTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -261,6 +317,14 @@ class StartSynthesisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         disable_asyncio_debug()
         self.app = import_app_with_fakes()
         self.app.logger.disabled = True
+        self._real_iter_edge_audio = self.app._iter_edge_audio
+
+        async def default_edge_audio(_text, _voice, _rate):
+            # 生命周期测试多数只替换 encoder/feed；为新的首块 admission 提供
+            # 确定的离线源，避免 fake edge_tts.object 被当作上游行为测试。
+            yield b"default-edge-audio"
+
+        self.app._iter_edge_audio = default_edge_audio
 
     async def asyncTearDown(self):
         self.app.logger.disabled = False
@@ -272,7 +336,7 @@ class StartSynthesisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_encoder(engine):
             return proc
 
-        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio):
+        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio, **_kwargs):
             return  # 不置位 first_audio，正常结束
 
         self.app._create_mp3_encoder = fake_encoder
@@ -285,6 +349,134 @@ class StartSynthesisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(proc.killed)
         self.assertTrue(proc.waited)
 
+    async def test_synthesis_deadline_covers_encoder_spawn(self):
+        """R38: 配置的 REST deadline 应覆盖 encoder 创建/进程 spawn。"""
+        proc = FakeProc(stdout=ScriptedStdout([b"encoded"]))
+        self.app.TTS_SYNTHESIS_TIMEOUT_SECONDS = 0.01
+
+        async def slow_encoder(_engine):
+            await asyncio.sleep(0.05)
+            return proc
+
+        async def immediate_feed(_proc, _text, _engine, _voice, _speed, first_audio, **_kwargs):
+            first_audio.set()
+
+        self.app._create_mp3_encoder = slow_encoder
+        self.app._feed_mp3 = immediate_feed
+
+        with self.assertRaises(self.app.HTTPException) as ctx:
+            await self.app._start_synthesis("hello", "edge", "voice", 1.0)
+
+        self.assertEqual(ctx.exception.status_code, 504)
+
+    async def test_edge_retry_backoff_precedes_encoder_admission(self):
+        """R39: Edge 首音频前退避不应先占用 REST encoder。"""
+        retry_sleep = asyncio.Event()
+        encoder_called = asyncio.Event()
+        real_sleep = self.app.asyncio.sleep
+        self.app.EDGE_RETRY_MAX_ATTEMPTS = 2
+
+        async def fake_encoder(_engine):
+            encoder_called.set()
+            return FakeProc(stdout=HangingStdout())
+
+        async def blocked_sleep(_delay):
+            retry_sleep.set()
+            await asyncio.Event().wait()
+
+        self.app._create_mp3_encoder = fake_encoder
+        self.app._iter_edge_audio = self._real_iter_edge_audio
+        self.app.edge_tts.Communicate = make_communicate(
+            FailingEdgeStream(RuntimeError("retry me"))
+        )
+        self.app.asyncio.sleep = blocked_sleep
+        task = asyncio.create_task(
+            self.app._start_synthesis("hello", "edge", "voice", 1.0)
+        )
+        try:
+            await asyncio.wait_for(retry_sleep.wait(), timeout=0.2)
+            self.assertFalse(
+                encoder_called.is_set(),
+                "Edge retry backoff must happen before encoder admission",
+            )
+        finally:
+            self.app.asyncio.sleep = real_sleep
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+    async def test_kokoro_waits_for_admission_before_claiming_encoder(self):
+        """R14: 等待 Kokoro 推理槽时，不应先占用 ffmpeg encoder 槽。"""
+        proc = FakeProc(stdout=ScriptedStdout([b"encoded"]))
+        encoder_called = asyncio.Event()
+
+        class CountingSemaphore(asyncio.Semaphore):
+            def __init__(self):
+                super().__init__(0)
+                self.acquire_calls = 0
+
+            async def acquire(self):
+                self.acquire_calls += 1
+                return await super().acquire()
+
+        semaphore = CountingSemaphore()
+        self.app._synthesis_semaphore = semaphore
+
+        class FakeAudio:
+            def detach(self):
+                return self
+
+            def cpu(self):
+                return self
+
+            def numpy(self):
+                return np.array([0.5], dtype=np.float32)
+
+        pipeline_calls = []
+
+        def pipeline(text, voice, speed):
+            pipeline_calls.append(
+                {"text": text, "voice": voice, "speed": speed}
+            )
+            yield type(
+                "Result",
+                (),
+                {"output": type("Output", (), {"audio": FakeAudio()})()},
+            )()
+
+        self.app.pipeline_en = pipeline
+
+        async def fake_encoder(_engine):
+            encoder_called.set()
+            return proc
+
+        self.app._create_mp3_encoder = fake_encoder
+        task = asyncio.create_task(
+            self.app._start_synthesis("hello", "kokoro", "af_heart", 1.0)
+        )
+        session = None
+        try:
+            await asyncio.sleep(0.02)
+            self.assertFalse(
+                encoder_called.is_set(),
+                "Kokoro 请求排队时不应先占用 ffmpeg encoder",
+            )
+            semaphore.release()
+            session = await asyncio.wait_for(task, timeout=1.0)
+            self.assertTrue(encoder_called.is_set())
+            self.assertEqual(semaphore.acquire_calls, 1)
+            self.assertEqual(
+                pipeline_calls,
+                [{"text": "hello", "voice": "af_heart", "speed": 1.0}],
+            )
+        finally:
+            if session is not None:
+                await self.app._dispose_mp3_session(*session)
+            elif not task.done():
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
     async def test_kokoro_feed_exception_before_audio_raises_500(self):
         # kokoro(本机引擎)预检期失败归 500；子进程被回收。
         proc = FakeProc()
@@ -292,7 +484,7 @@ class StartSynthesisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_encoder(engine):
             return proc
 
-        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio):
+        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio, **_kwargs):
             raise RuntimeError("kokoro boom")
 
         self.app._create_mp3_encoder = fake_encoder
@@ -312,7 +504,7 @@ class StartSynthesisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_encoder(engine):
             return proc
 
-        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio):
+        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio, **_kwargs):
             raise RuntimeError("edge boom")
 
         self.app._create_mp3_encoder = fake_encoder
@@ -325,13 +517,42 @@ class StartSynthesisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(proc.killed)
         self.assertTrue(proc.waited)
 
+    async def test_edge_feed_error_survives_cleanup_wait_failure(self):
+        cleanup_error = OSError("wait status unavailable")
+
+        class FailingWaitProc(FakeProc):
+            async def wait(self):
+                self.waited = True
+                raise cleanup_error
+
+        proc = FailingWaitProc()
+
+        async def fake_encoder(engine):
+            return proc
+
+        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio, **_kwargs):
+            raise RuntimeError("edge boom")
+
+        self.app._create_mp3_encoder = fake_encoder
+        self.app._feed_mp3 = fake_feed
+
+        with self.assertRaises(self.app.HTTPException) as ctx:
+            await self.app._start_synthesis(
+                "hello", "edge", "en-US-AriaNeural", 1.0
+            )
+
+        self.assertEqual(ctx.exception.status_code, 502)
+        self.assertIs(ctx.exception.__cause__, cleanup_error)
+        self.assertTrue(proc.killed)
+        self.assertTrue(proc.waited)
+
     async def test_edge_first_audio_signal_and_feed_failure_same_tick_raises_502(self):
         proc = FakeProc()
 
         async def fake_encoder(engine):
             return proc
 
-        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio):
+        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio, **_kwargs):
             first_audio.set()
             raise RuntimeError("edge failed with first audio signal")
 
@@ -347,14 +568,216 @@ class StartSynthesisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(proc.killed)
         self.assertTrue(proc.waited)
 
-    async def test_audio_produced_returns_proc_and_live_feed_task(self):
-        # 首音频事件置位后：放行流式，返回 (proc, feed_task)，proc 不被回收。
+    async def test_encoder_eof_does_not_mask_edge_upstream_failure_as_500(self):
         proc = FakeProc()
+        allow_failure = asyncio.Event()
+        real_sleep = asyncio.sleep
 
         async def fake_encoder(engine):
             return proc
 
-        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio):
+        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio, **_kwargs):
+            first_audio.set()
+            await allow_failure.wait()
+            raise RuntimeError("edge upstream failed after first audio")
+
+        self.app._create_mp3_encoder = fake_encoder
+        self.app._feed_mp3 = fake_feed
+        async def release_failure_on_yield(delay):
+            allow_failure.set()
+            await real_sleep(delay)
+
+        self.app.asyncio.sleep = release_failure_on_yield
+        try:
+            with self.assertRaises(self.app.HTTPException) as ctx:
+                await self.app._start_synthesis(
+                    "hello", "edge", "en-US-AriaNeural", 1.0
+                )
+        finally:
+            self.app.asyncio.sleep = real_sleep
+
+        self.assertEqual(ctx.exception.status_code, 502)
+        self.assertTrue(proc.killed)
+        self.assertTrue(proc.waited)
+
+    async def test_edge_encoder_stdin_failure_maps_to_local_500(self):
+        class BrokenDrainStdin:
+            def __init__(self):
+                self.closed = False
+
+            def write(self, _data):
+                pass
+
+            async def drain(self):
+                raise BrokenPipeError("ffmpeg stdin closed")
+
+            def close(self):
+                self.closed = True
+
+        proc = FakeProc(
+            stdin=BrokenDrainStdin(),
+            stdout=ScriptedStdout([b"CONTAINER-HEADER"]),
+        )
+
+        async def fake_encoder(_engine):
+            return proc
+
+        async def one_edge_chunk(_text, _voice, _rate):
+            yield b"EDGE-AUDIO"
+
+        self.app._create_mp3_encoder = fake_encoder
+        self.app._iter_edge_audio = one_edge_chunk
+
+        with self.assertRaises(self.app.HTTPException) as ctx:
+            await self.app._start_synthesis(
+                "hello", "edge", "en-US-AvaNeural", 1.0
+            )
+
+        self.assertEqual(ctx.exception.status_code, 500)
+        self.assertTrue(proc.stdin.closed)
+        self.assertTrue(proc.killed)
+        self.assertTrue(proc.waited)
+
+    async def test_encoder_eof_before_source_fails_without_global_timeout(self):
+        proc = FakeProc()
+        feed_cancelled = asyncio.Event()
+
+        async def fake_encoder(_engine):
+            return proc
+
+        async def pending_feed(
+            proc_arg, text, engine, voice, speed, first_audio, **_kwargs
+        ):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                feed_cancelled.set()
+                raise
+
+        self.app.TTS_SYNTHESIS_TIMEOUT_SECONDS = 0
+        self.app._create_mp3_encoder = fake_encoder
+        self.app._feed_mp3 = pending_feed
+
+        with self.assertRaises(self.app.HTTPException) as ctx:
+            await asyncio.wait_for(
+                self.app._start_synthesis(
+                    "hello", "edge", "en-US-AvaNeural", 1.0
+                ),
+                0.2,
+            )
+
+        self.assertEqual(ctx.exception.status_code, 500)
+        self.assertTrue(feed_cancelled.is_set())
+        self.assertTrue(proc.killed)
+        self.assertTrue(proc.waited)
+
+    async def test_encoder_read_error_before_source_fails_without_timeout(self):
+        class FailingStdout:
+            async def read(self, _size):
+                raise OSError("encoder stdout read failed")
+
+        proc = FakeProc(stdout=FailingStdout())
+        feed_cancelled = asyncio.Event()
+
+        async def fake_encoder(_engine):
+            return proc
+
+        async def pending_feed(
+            proc_arg, text, engine, voice, speed, first_audio, **_kwargs
+        ):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                feed_cancelled.set()
+                raise
+
+        self.app.TTS_SYNTHESIS_TIMEOUT_SECONDS = 0
+        self.app._create_mp3_encoder = fake_encoder
+        self.app._feed_mp3 = pending_feed
+
+        with self.assertRaises(self.app.HTTPException) as ctx:
+            await asyncio.wait_for(
+                self.app._start_synthesis(
+                    "hello", "edge", "en-US-AvaNeural", 1.0
+                ),
+                0.2,
+            )
+
+        self.assertEqual(ctx.exception.status_code, 500)
+        self.assertTrue(feed_cancelled.is_set())
+        self.assertTrue(proc.killed)
+        self.assertTrue(proc.waited)
+
+    async def test_nonzero_encoder_exit_with_header_is_rejected_pre_stream(self):
+        proc = FakeProc(stdout=ScriptedStdout([b"CONTAINER-HEADER"]))
+        proc.returncode = 1
+
+        async def fake_encoder(_engine):
+            return proc
+
+        async def live_feed(
+            proc_arg, text, engine, voice, speed, first_audio, **_kwargs
+        ):
+            first_audio.set()
+            await asyncio.Event().wait()
+
+        self.app._create_mp3_encoder = fake_encoder
+        self.app._feed_mp3 = live_feed
+        session = None
+        try:
+            with self.assertRaises(self.app.HTTPException) as ctx:
+                session = await self.app._start_synthesis(
+                    "hello", "edge", "en-US-AvaNeural", 1.0
+                )
+            self.assertEqual(ctx.exception.status_code, 500)
+        finally:
+            if session is not None:
+                await self.app._dispose_mp3_session(*session)
+
+        self.assertTrue(proc.waited)
+
+    async def test_zero_exit_with_live_feed_is_rejected_pre_stream(self):
+        proc = FakeProc(stdout=ScriptedStdout([b"CONTAINER-HEADER"]))
+        proc.returncode = 0
+        feed_cancelled = asyncio.Event()
+
+        async def fake_encoder(_engine):
+            return proc
+
+        async def live_feed(
+            proc_arg, text, engine, voice, speed, first_audio, **_kwargs
+        ):
+            first_audio.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                feed_cancelled.set()
+                raise
+
+        self.app._create_mp3_encoder = fake_encoder
+        self.app._feed_mp3 = live_feed
+        session = None
+        try:
+            with self.assertRaises(self.app.HTTPException) as ctx:
+                session = await self.app._start_synthesis(
+                    "hello", "edge", "en-US-AvaNeural", 1.0
+                )
+            self.assertEqual(ctx.exception.status_code, 500)
+        finally:
+            if session is not None:
+                await self.app._dispose_mp3_session(*session)
+
+        self.assertTrue(feed_cancelled.is_set())
+        self.assertTrue(proc.waited)
+
+    async def test_audio_produced_returns_proc_and_live_feed_task(self):
+        # 首音频事件置位后：放行流式，返回 (proc, feed_task)，proc 不被回收。
+        proc = FakeProc(stdout=ScriptedStdout([b"ENCODED"]))
+
+        async def fake_encoder(engine):
+            return proc
+
+        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio, **_kwargs):
             first_audio.set()
             # 继续存活，模拟后续内容仍在喂入
             await asyncio.Event().wait()
@@ -384,7 +807,7 @@ class StartSynthesisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_encoder(engine):
             return proc
 
-        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio):
+        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio, **_kwargs):
             self.app._captured_feed_task = asyncio.current_task()
             raise RuntimeError("boom")
 
@@ -420,7 +843,7 @@ class StartSynthesisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_encoder(engine):
             return proc
 
-        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio):
+        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio, **_kwargs):
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -443,8 +866,57 @@ class StartSynthesisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(proc.killed)
         self.assertTrue(proc.waited)
 
+    async def test_cancellation_stops_pending_first_output_read_and_releases_once(self):
+        output_started = asyncio.Event()
+        output_cancelled = asyncio.Event()
+        feed_started = asyncio.Event()
+        feed_cancelled = asyncio.Event()
+
+        class CancellableStdout:
+            async def read(self, _size):
+                output_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    output_cancelled.set()
+                    raise
+
+        proc = FakeProc(stdout=CancellableStdout())
+        limiter = self.app.FfmpegLimiter(1)
+        self.app._ffmpeg_limiter = limiter
+
+        async def fake_encoder(_engine):
+            self.assertTrue(await limiter.acquire())
+            return proc
+
+        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio, **_kwargs):
+            feed_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                feed_cancelled.set()
+                raise
+
+        self.app._create_mp3_encoder = fake_encoder
+        self.app._feed_mp3 = fake_feed
+        owner = asyncio.create_task(
+            self.app._start_synthesis("hello", "edge", "voice", 1.0)
+        )
+        await asyncio.wait_for(output_started.wait(), 0.2)
+        await asyncio.wait_for(feed_started.wait(), 0.2)
+        owner.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await owner
+
+        self.assertTrue(output_cancelled.is_set())
+        self.assertTrue(feed_cancelled.is_set())
+        self.assertTrue(proc.killed)
+        self.assertTrue(proc.waited)
+        self.assertEqual(limiter.active, 0)
+
     async def test_preflight_timeout_raises_504_and_reaps_resources(self):
-        proc = FakeProc()
+        proc = FakeProc(stdout=HangingStdout())
         self.app.TTS_SYNTHESIS_TIMEOUT_SECONDS = 0.01
         feed_cancelled = asyncio.Event()
         reap_calls = 0
@@ -452,7 +924,7 @@ class StartSynthesisLifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_encoder(engine):
             return proc
 
-        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio):
+        async def fake_feed(proc_arg, text, engine, voice, speed, first_audio, **_kwargs):
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -489,7 +961,7 @@ class StartSynthesisLifecycleTests(unittest.IsolatedAsyncioTestCase):
             return proc
 
         async def blocking_feed(
-            proc_arg, text, engine, voice, speed, first_audio
+            proc_arg, text, engine, voice, speed, first_audio, **_kwargs
         ):
             try:
                 await asyncio.Event().wait()
