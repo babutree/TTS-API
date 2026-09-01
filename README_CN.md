@@ -224,7 +224,7 @@ tts-api
 - 明确边界：`stream_format=sse`、非空 `instructions`、`lang_code`、`lang`、`language`、仅见于指南示例的 `format` 别名，以及 custom voice 对象尚未实现，会返回 `400`/`422`，不会静默接受。
 - 与官方云端不完全相同：`speed` 为 `0.5`–`3.0`（不是 `0.25`–`4.0`）、只映射七个内置别名、model 名表示本地引擎而非 OpenAI 同名模型、朗读前会清理 Markdown，且 `/v1` 不会因同源头而跳过已配置的 API Key。
 
-Hermes 用户应留空 `instructions` 与 `language`；OpenClaw 用户应留空 `instructions` 与 `extraBody.lang`。完整客户端矩阵、意图性差异与尚未实机验证的边界见[兼容性审计](OPENAI_AGENT_TTS_COMPATIBILITY_AUDIT.md)。
+Hermes 用户应留空 `instructions` 与 `language`；OpenClaw 用户应留空 `instructions` 与 `extraBody.lang`。上面各条已列出与官方云端的全部意图性差异；未列出的行为属于尚未对真实客户端实机验证的部分，而非承诺。
 
 ## 测试
 

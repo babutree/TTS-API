@@ -224,7 +224,7 @@ Agents and OpenAI SDK clients can call `POST /v1/audio/speech` with the usual `{
 - Explicit boundaries: `stream_format=sse`, non-empty `instructions`, `lang_code`, `lang`, `language`, or the guide-only `format` alias, and custom voice objects are not implemented and return `400`/`422`; they are not silently accepted.
 - Not identical to OpenAI cloud: `speed` is `0.5`–`3.0` (not `0.25`–`4.0`), only seven built-in aliases are mapped, model names select local engines rather than OpenAI models, Markdown markup is stripped before speak, and `/v1` never skips configured API-key checks via same-origin headers.
 
-Hermes users should leave `instructions` and `language` unset. OpenClaw users should leave `instructions` and `extraBody.lang` unset. See [the compatibility audit](OPENAI_AGENT_TTS_COMPATIBILITY_AUDIT.md) for the exact client matrices, intentional differences, and unverified runtime boundaries.
+Hermes users should leave `instructions` and `language` unset. OpenClaw users should leave `instructions` and `extraBody.lang` unset. The bullets above list every intentional difference from OpenAI cloud; anything not listed is unverified against a live client rather than guaranteed.
 
 ## Testing
 

@@ -393,7 +393,6 @@ class ApiReferenceContractTests(unittest.TestCase):
             for response_format in ("opus", "aac", "flac", "wav", "pcm"):
                 self.assertIn(response_format, text.lower(), label)
             self.assertIn("coral", text, label)
-            self.assertIn("OPENAI_AGENT_TTS_COMPATIBILITY_AUDIT.md", text, label)
         self.assertIn("compatibility subset", en)
         self.assertIn("never override `model`", en)
         self.assertIn("Kokoro script mismatches", en)
@@ -404,73 +403,6 @@ class ApiReferenceContractTests(unittest.TestCase):
         self.assertIn("OpenAI binary output formats", changelog)
         self.assertIn("nullable `param`", changelog)
         self.assertIn("silent partial success", changelog.lower())
-
-    def test_openai_agent_compatibility_audit_records_current_differences(self):
-        audit = (ROOT / "OPENAI_AGENT_TTS_COMPATIBILITY_AUDIT.md").read_text(
-            encoding="utf-8"
-        )
-
-        for heading in (
-            "## 3. 当前本地 `/v1` 契约",
-            "## 4. Hermes 兼容性",
-            "## 5. OpenClaw 兼容性",
-            "## 6. 与官方 OpenAI 的剩余差异",
-            "## 7. 本轮确认并修复的缺陷",
-            "## 8. R1-R42 当前状态与残余边界",
-            "## 9. 拒绝的误报",
-        ):
-            self.assertIn(heading, audit)
-
-        for evidence in (
-            "db14b6e1712aaf5265cf5a6871adff7a9c61d31c",
-            "ef05a7d18e8361205342aa6c5bb9d77404c2c3ce",
-            "4f404262955cb711c56c07cce52076b6107303e5",
-            "b4f8c491d3452926deb7628edbdb6fe2a85ff576",
-            "319fd692d1c83bc05b3a38e4673f2e2fa5398db0",
-            "f3cda0ceb18d8ba7465a6d223098ef0e56c8fee1",
-            "ba756a23ad4335ebbb252be297ff7962a077f573",
-            "POST** `/audio/voices`",
-            "additionalProperties:false",
-            "TTS_SYNTHESIS_TIMEOUT_SECONDS=0",
-            "_PostStreamSynthesisError",
-            'tts.auto: "always"',
-            "extraBody.response_format",
-            "Kokoro-only `200`",
-            "纯 Cyrillic",
-            "fenced code",
-            "proc.wait()",
-            "排队等待 semaphore",
-            "没有独立清理期限",
-            "覆盖原本的流超时/取消异常",
-            "官方资料源间漂移",
-            "`language` / `format`",
-            "managed token",
-            "跨 origin",
-            "readResponseWithLimit()",
-            "Edge decoder ended before upstream feed completed",
-            "Edge decoder produced no PCM output",
-            "延迟回填",
-            "X-Client-Request-Id",
-            "ASGI 2.4",
-            "wait() 自身异常",
-            "请求体大小",
-            "kill() 正常返回",
-            "EDGE_DECODER_EXIT_GRACE_SECONDS",
-            "MAX_TEXT_LENGTH=0",
-            "外部取消必须传播",
-        ):
-            self.assertIn(evidence, audit)
-
-        self.assertNotIn("当前服务会在合成前稳定返回 `400`", audit)
-        self.assertNotIn("应用请求体门禁尚不存在", audit)
-        self.assertNotIn("可发音门禁只认可汉字与 ASCII", audit)
-        self.assertNotIn("UI 正则仍只覆盖基本区", audit)
-        self.assertNotIn("`coral` 当前没有别名映射", audit)
-        self.assertRegex(
-            audit,
-            r'Kokoro ID 必须同时显式\s+`model:"kokoro"`',
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

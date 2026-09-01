@@ -15,8 +15,38 @@ app = import_app_with_fakes()
 
 
 class CleanTextTests(unittest.TestCase):
-    def test_fenced_code_block_removed_entirely(self):
-        self.assertEqual(app.clean_text("before```py\nx=1\n```after"), "beforeafter")
+    def test_fenced_code_block_removed_but_line_count_preserved(self):
+        # 围栏内容整体删除，但保留其占用的换行数。两条理由：
+        # 1) 与同类删除保持一致 —— 图片删除留下间隙("pre  post")而非焊接两侧文字，
+        #    塌成 "beforeafter" 会造出一个不存在的词，TTS 会当成一个词读出来。
+        # 2) WS 的 Kokoro 路径靠 \n 还原前端合成单元；前端不做删除、看到的是 3 行，
+        #    后端若塌成 1 行，seg 计数即错位，变速续播会跳到错误句子。
+        self.assertEqual(
+            app.clean_text("before```py\nx=1\n```after"), "before\n\nafter"
+        )
+
+    def test_fenced_code_block_content_is_never_spoken(self):
+        # 围栏内的代码必须消失，不能因为保行而漏读出来。
+        cleaned = app.clean_text("A.\n```python\nprint(1)\n```\nB.")
+        self.assertNotIn("print", cleaned)
+        self.assertNotIn("python", cleaned)
+        self.assertEqual(cleaned.count("\n"), 4)
+
+    def test_block_removals_preserve_line_count(self):
+        # 前后端单元对齐依赖"清洗不改变行数"这一性质，逐结构锁定。
+        for src in (
+            "A.\n---\nB.",
+            "A.\n![img](x.png)\nB.",
+            "A.\n# Title\nB.",
+            "A.\n> quote\nB.",
+            "A.\n- item\nB.",
+            "A.\n1. item\nB.",
+            "A.\n```\ncode();\n```\nB.",
+        ):
+            with self.subTest(src=src):
+                self.assertEqual(
+                    app.clean_text(src).count("\n"), src.count("\n")
+                )
 
     def test_inline_code_keeps_inner_text(self):
         self.assertEqual(app.clean_text("use `pip install` now"), "use pip install now")

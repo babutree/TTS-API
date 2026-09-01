@@ -1904,5 +1904,140 @@ class RequestDisconnectLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(feed_task.cancelled())
 
 
+class LateStreamEncoderExitBoundTests(unittest.IsolatedAsyncioTestCase):
+    """stdout EOF 后等待编码器退出必须有上界，否则 ffmpeg 配额被永久占死。
+
+    默认 TTS_SYNTHESIS_TIMEOUT_SECONDS=0(关闭)，此前该分支走无界 await
+    proc.wait()。ffmpeg 关闭 stdout 后不退出即让请求永挂并占死配额，默认
+    仅 2 槽，两次即所有 REST 合成返回 429 且不可自愈。
+    """
+
+    class _NeverExitingEncoder:
+        """已 EOF、returncode 仍为 None、永不退出的编码器。"""
+
+        def __init__(self):
+            self.returncode = None
+            self.pid = 4243
+
+        async def wait(self):
+            await asyncio.sleep(3600)
+
+    def setUp(self):
+        self.app = import_app_with_fakes()
+        self.app.logger.disabled = True
+        self._synthesis_timeout = self.app.TTS_SYNTHESIS_TIMEOUT_SECONDS
+        self._reap_timeout = self.app.UNKILLABLE_PROC_REAP_TIMEOUT_SECONDS
+        self.app.UNKILLABLE_PROC_REAP_TIMEOUT_SECONDS = 0.05
+
+    def tearDown(self):
+        self.app.TTS_SYNTHESIS_TIMEOUT_SECONDS = self._synthesis_timeout
+        self.app.UNKILLABLE_PROC_REAP_TIMEOUT_SECONDS = self._reap_timeout
+        self.app.logger.disabled = False
+
+    async def _completed_feed_task(self):
+        async def noop():
+            return None
+
+        task = asyncio.create_task(noop())
+        await task
+        return task
+
+    async def test_default_config_still_bounds_the_encoder_exit_wait(self):
+        # 回归核心：timeout 关闭时也必须有上界，不能依赖用户配置。
+        self.app.TTS_SYNTHESIS_TIMEOUT_SECONDS = 0.0
+        feed_task = await self._completed_feed_task()
+
+        with self.assertRaises(self.app._PostStreamSynthesisError) as caught:
+            await asyncio.wait_for(
+                self.app._raise_for_late_stream_failure(
+                    self._NeverExitingEncoder(), feed_task, "edge", "v"
+                ),
+                2.0,
+            )
+
+        self.assertIn("did not exit after output ended", str(caught.exception))
+
+    async def test_configured_synthesis_timeout_still_takes_precedence(self):
+        # 配了合成超时时沿用它，不被兜底上界覆盖。
+        self.app.TTS_SYNTHESIS_TIMEOUT_SECONDS = 0.05
+        self.app.UNKILLABLE_PROC_REAP_TIMEOUT_SECONDS = 3600
+        feed_task = await self._completed_feed_task()
+
+        with self.assertRaises(self.app._PostStreamSynthesisError):
+            await asyncio.wait_for(
+                self.app._raise_for_late_stream_failure(
+                    self._NeverExitingEncoder(), feed_task, "edge", "v"
+                ),
+                2.0,
+            )
+
+    async def test_promptly_exiting_encoder_is_still_treated_as_success(self):
+        # 常态路径不得被上界改变语义。
+        self.app.TTS_SYNTHESIS_TIMEOUT_SECONDS = 0.0
+        feed_task = await self._completed_feed_task()
+
+        class PromptExit:
+            returncode = None
+            pid = 4244
+
+            async def wait(self):
+                await asyncio.sleep(0)
+                self.returncode = 0
+                return 0
+
+        await asyncio.wait_for(
+            self.app._raise_for_late_stream_failure(
+                PromptExit(), feed_task, "edge", "v"
+            ),
+            2.0,
+        )
+
+    async def test_nonzero_encoder_exit_still_reports_its_status(self):
+        self.app.TTS_SYNTHESIS_TIMEOUT_SECONDS = 0.0
+        feed_task = await self._completed_feed_task()
+
+        class FailedExit:
+            returncode = None
+            pid = 4245
+
+            async def wait(self):
+                await asyncio.sleep(0)
+                self.returncode = 3
+                return 3
+
+        with self.assertRaises(self.app._PostStreamSynthesisError) as caught:
+            await asyncio.wait_for(
+                self.app._raise_for_late_stream_failure(
+                    FailedExit(), feed_task, "edge", "v"
+                ),
+                2.0,
+            )
+
+        self.assertIn("exited with status 3", str(caught.exception))
+
+
+class LateStreamSourceContractTests(unittest.TestCase):
+    """锁定源码形状，防止无界 await 被静默改回。"""
+
+    def setUp(self):
+        import pathlib
+
+        self.source = (
+            pathlib.Path(__file__).resolve().parents[1] / "app.py"
+        ).read_text(encoding="utf-8")
+
+    def test_encoder_exit_wait_is_never_unbounded(self):
+        self.assertIn(
+            "TTS_SYNTHESIS_TIMEOUT_SECONDS\n                or UNKILLABLE_PROC_REAP_TIMEOUT_SECONDS",
+            self.source,
+            "编码器退出等待必须有兜底上界，不能只在配了合成超时时才有界",
+        )
+        self.assertNotIn(
+            "encoder_returncode = await wait_for_exit",
+            self.source,
+            "无界 await proc.wait() 已被移除，不得回退",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

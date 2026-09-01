@@ -50,6 +50,10 @@ DEFAULT_MAX_REQUEST_BODY_BYTES = 1024 * 1024
 DEFAULT_RESPONSE_WRITE_TIMEOUT_SECONDS = 30.0
 DEFAULT_KOKORO_MAX_UNIT_CHARS = 2000
 EDGE_DECODER_EXIT_GRACE_SECONDS = 1.0
+# kill() 失败(EPERM 等)后等待子进程退出的上界。超过则放弃等待并释放配额：
+# 继续无界等待会让该 ffmpeg 槽永久不可用，默认只有 2 个槽，重复发生即服务瘫痪。
+# 放弃等待意味着可能残留孤儿进程，因此必须记 error 级日志供运维介入。
+UNKILLABLE_PROC_REAP_TIMEOUT_SECONDS = 10.0
 REQUEST_ID_MAX_LENGTH = 64
 VOICE_MAX_LENGTH = 256
 _VOICE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
@@ -262,10 +266,26 @@ class FfmpegLimiter:
             return True
 
     def release(self, prefetch: bool = False):
+        # 下限守卫防止计数变负，但"多释放"意味着调用方配对逻辑已损坏：计数会低于
+        # 真实进程数，acquire 随后会放行超过 max_active 的 ffmpeg(默认仅 2 个槽)。
+        # 静默夹取会让这类回归无迹可查，故显式记 error 暴露出来。
         if self.active > 0:
             self.active -= 1
-        if prefetch and self.active_prefetch > 0:
-            self.active_prefetch -= 1
+        else:
+            logger.error(
+                "ffmpeg limiter released more times than acquired "
+                "(active=0, prefetch=%s); quota accounting is corrupted and the "
+                "concurrency cap may be breached — check reap/release pairing",
+                prefetch,
+            )
+        if prefetch:
+            if self.active_prefetch > 0:
+                self.active_prefetch -= 1
+            else:
+                logger.error(
+                    "ffmpeg limiter prefetch counter released below zero; "
+                    "prefetch accounting is corrupted"
+                )
 
 
 _ffmpeg_limiter = FfmpegLimiter(TTS_MAX_FFMPEG_PROCESSES)
@@ -957,7 +977,14 @@ def to_pcm(audio: np.ndarray) -> bytes:
 
 def clean_text(text: str) -> str:
     # 去除 markdown 标记，避免被读出来
-    text = re.sub(r'```[\s\S]*?```', '', text)          # 代码块
+    # 代码块：整体删除，但保留其占用的换行数。WS 的 Kokoro 路径靠 \n 还原前端的合成
+    # 单元，若把跨行围栏塌成空串，行数就少于前端句数 —— seg 计数错位，变速续播会
+    # 定位到错误句子(CLAUDE.md 标为 critical 的对齐契约)。段落间隔也因此得以保留。
+    text = re.sub(
+        r'```[\s\S]*?```',
+        lambda m: "\n" * m.group(0).count("\n"),
+        text,
+    )
     text = re.sub(r'`([^`]*)`', r'\1', text)            # 行内代码
     text = re.sub(r'!\[[^\]]*\]\([^)]*\)', '', text)    # 图片
     text = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', text)  # 链接保留文字
@@ -1006,7 +1033,13 @@ def clean_text(text: str) -> str:
     text = re.sub(r'\*(\S(?:.*?\S)?)\*', r'\1', text)  # 斜体 *text*
     text = re.sub(r'\*{2,}', '', text)                    # 残留 markdown 星号(如未闭合 **)
     text = re.sub(r'~~(.*?)~~', r'\1', text)            # 删除线
-    text = re.sub(r'^\s*([-*_])(?:\s*\1){2,}\s*$', '', text, flags=re.MULTILINE)  # 分隔线(---/***/___)
+    # 分隔线(---/***/___)。用 [^\S\n] 而非 \s 限定为"行内空白"：\s 含换行，
+    # MULTILINE 下会让单次匹配跨越连续两条分隔线并吞掉其间的换行，行数随之减少，
+    # 前后端单元对齐即被打破(连续分隔线是 markdown 里常见的分节写法)。
+    text = re.sub(
+        r'^[^\S\n]*([-*_])(?:[^\S\n]*\1){2,}[^\S\n]*$', '', text,
+        flags=re.MULTILINE,
+    )
     # 引号不发音，但会被 Kokoro 音素化成杂音(尤其结尾引号产生"嗯哼"声)，移除。
     # 直/弯双引号、中文方括号引号、书名号一并去除；保留 ASCII 单引号 ' 以免破坏英文缩写(don't/it's)。
     text = re.sub(r'["“”「」『』《》]', '', text)
@@ -1652,8 +1685,12 @@ def parse_ws_request(req: dict):
     if len(raw_text) > MAX_TEXT_LENGTH:
         return {"type": "error", "message": f"文本超过长度限制（最大 {MAX_TEXT_LENGTH} 字）"}
 
-    text = clean_text(raw_text).strip()
-    if not text:
+    # clean_text 逐结构保留行数(代码围栏也只塌成等量换行)，故整篇清洗后按 \n 切分
+    # 仍与前端 splitSentences 的句序 1:1 对应。只 strip 每行两端，不丢弃空行 ——
+    # 空行是前端某一句被整行清洗掉后的位置占位，丢掉就会让 seg 计数错位。
+    lines = [line.strip() for line in clean_text(raw_text).split("\n")]
+    text = "\n".join(lines)
+    if not text.strip():
         return {"type": "error", "message": "文本清洗后为空"}
 
     engine = req.get("engine", "kokoro")
@@ -2026,8 +2063,37 @@ async def _await_cleanup(awaitable):
     return result
 
 
+async def _reap_wait_bounded(proc, kill_failed: bool, label: str):
+    """等待子进程退出并返回退出码；kill 失败时给等待加上界。
+
+    kill() 成功后进程必然很快退出，此时无界 wait 是安全的(且能如实反映终态)。
+    但 kill() 抛 EPERM 等错误时进程可能永不退出，无界 wait 会把 ffmpeg 配额
+    永久占死——默认仅 2 个槽，重复发生即整个服务无法再合成。此处仅对该异常
+    分支加超时：放弃等待、让调用方释放配额，并记 error 日志暴露孤儿进程。
+    """
+    if not kill_failed:
+        return await _await_cleanup(proc.wait())
+    try:
+        return await _await_cleanup(
+            asyncio.wait_for(
+                proc.wait(), UNKILLABLE_PROC_REAP_TIMEOUT_SECONDS
+            )
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "%s survived kill() and did not exit within %.0fs; releasing its "
+            "ffmpeg slot and leaving an orphan process (pid=%s) — investigate "
+            "host process limits",
+            label,
+            UNKILLABLE_PROC_REAP_TIMEOUT_SECONDS,
+            getattr(proc, "pid", "unknown"),
+        )
+        return None
+
+
 async def _reap_proc(proc):
     # 回收 ffmpeg 子进程并释放配额；调用方必须保持单一所有权，禁止重复进入。
+    kill_failed = False
     if proc.returncode is None:
         try:
             proc.kill()
@@ -2036,9 +2102,10 @@ async def _reap_proc(proc):
         except OSError as exc:
             # kill 失败不等于进程仍不会退出；feed 已关闭 stdin，继续 wait 才能在
             # 确认终态后释放配额，也避免该异常跳过整个回收链。
+            kill_failed = True
             logger.warning("Could not kill REST encoder; waiting for exit: %s", exc)
     try:
-        await _await_cleanup(proc.wait())
+        await _reap_wait_bounded(proc, kill_failed, "REST encoder")
     finally:
         _ffmpeg_limiter.release()
 
@@ -2087,17 +2154,21 @@ async def _create_edge_pcm_decoder(prefetch: bool = False):
 
 
 async def _reap_edge_pcm_decoder(process, prefetch: bool = False):
+    kill_failed = False
     if process.returncode is None:
         try:
             process.kill()
         except ProcessLookupError:
             pass
         except OSError as exc:
+            kill_failed = True
             logger.warning(
                 "Could not kill Edge decoder; waiting for exit: %s", exc
             )
     try:
-        returncode = await _await_cleanup(process.wait())
+        returncode = await _reap_wait_bounded(
+            process, kill_failed, "Edge decoder"
+        )
         if returncode is None:
             returncode = process.returncode
         return returncode
@@ -2584,13 +2655,18 @@ async def _raise_for_late_stream_failure(proc, feed_task, engine, voice):
     encoder_returncode = proc.returncode
     if reason is None and encoder_returncode is None:
         try:
-            wait_for_exit = proc.wait()
-            if TTS_SYNTHESIS_TIMEOUT_SECONDS:
-                encoder_returncode = await asyncio.wait_for(
-                    wait_for_exit, TTS_SYNTHESIS_TIMEOUT_SECONDS
-                )
-            else:
-                encoder_returncode = await wait_for_exit
+            # stdout 已 EOF，编码器正常情况下随即退出，故此处必须有上界：
+            # 无界 wait 会让"已 EOF 但不退出"的 ffmpeg 永久占死配额(默认仅 2 槽，
+            # 两次即全部合成返回 429)，且只有客户端主动断连才能解除。
+            # 不依赖 TTS_SYNTHESIS_TIMEOUT_SECONDS(默认 0 = 关闭)，与 kill 后的
+            # _reap_wait_bounded 保持同一防御姿态。
+            encoder_exit_timeout = (
+                TTS_SYNTHESIS_TIMEOUT_SECONDS
+                or UNKILLABLE_PROC_REAP_TIMEOUT_SECONDS
+            )
+            encoder_returncode = await asyncio.wait_for(
+                proc.wait(), encoder_exit_timeout
+            )
             if proc.returncode is not None:
                 encoder_returncode = proc.returncode
         except asyncio.TimeoutError as exc:
@@ -3204,11 +3280,20 @@ async def synth_edge(text, voice, speed, queue, ws, cancel_event, prefetch: bool
                 process.stdin.write(data)
                 await process.stdin.drain()
         finally:
-            await close_edge_stream()
+            # stdin 必须无条件关闭：aclose() 抛错也不能跳过它，否则 ffmpeg 收不到
+            # EOF、read() 永久阻塞。同时上游错误优先级高于关闭错误——把关闭异常
+            # 记日志后吞掉，避免它顶替真正的失败原因(错误归因错位)。
             try:
-                process.stdin.close()
-            except Exception:
-                pass
+                await close_edge_stream()
+            except BaseException as exc:
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                logger.warning("关闭 Edge 上游流失败: %s", exc)
+            finally:
+                try:
+                    process.stdin.close()
+                except Exception:
+                    pass
 
     async def read():
         # ffmpeg 管道每次返回字节数任意；按 16-bit 样本(2 字节)对齐后再发，
@@ -3371,24 +3456,56 @@ async def ws_tts(ws: WebSocket):
     await ws.accept()
 
     queue = asyncio.Queue(maxsize=32)
+    # sender 跨请求存活，需要一个句柄去中止"当前"正在跑的合成。用可变容器而非闭包捕获
+    # 局部变量，避免 sender 在首次赋值前读到未绑定名字。
+    active_cancel = {"event": None}
+
+    # 半开连接(客户端不读也不发 FIN)下 client_state 会合法地停在 CONNECTED，
+    # 此时 send 会阻塞在传输层写缓冲上。若无上界，sender 卡住 → 队列不再被 drain →
+    # 32 槽填满 → 生产者阻塞在 put → 主循环的 put(None) 也被同一个满队列钉死，
+    # 整个 handler(含其持有的 Kokoro 信号量/ffmpeg 配额)永久泄漏。
+    # TTS_SYNTHESIS_TIMEOUT_SECONDS 只能中断合成任务，管不到 put(None)，故必须在此设界。
+    send_wedged = False
+
+    async def _send_bounded(item) -> bool:
+        """发送单帧；返回 False 表示连接已不可用(此后只 drain 不再发)。"""
+        try:
+            if isinstance(item, (bytes, bytearray)):
+                coro = ws.send_bytes(item)
+            else:
+                coro = ws.send_json(item)
+            if TTS_RESPONSE_WRITE_TIMEOUT_SECONDS:
+                await asyncio.wait_for(
+                    coro, TTS_RESPONSE_WRITE_TIMEOUT_SECONDS
+                )
+            else:
+                await coro
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "WS 帧发送超过 %.0fs 未完成(疑似半开连接)：停止发送并转为纯 drain",
+                TTS_RESPONSE_WRITE_TIMEOUT_SECONDS,
+            )
+            return False
+        except Exception:
+            # 发送失败(连接已断)：继续 drain 队列，不退出，防止后续 put 堆积死锁
+            return True
 
     async def sender():
+        nonlocal send_wedged
         while True:
             item = await queue.get()
             try:
                 if item is None:
                     break
-                if ws.client_state == WebSocketState.DISCONNECTED:
+                if ws.client_state == WebSocketState.DISCONNECTED or send_wedged:
                     continue  # 丢弃剩余数据但继续 drain，避免生产者在 put 时永久阻塞
-                try:
-                    # bytes → PCM 二进制帧；dict → JSON 标记(如句边界 seg)。同队列保证顺序
-                    if isinstance(item, (bytes, bytearray)):
-                        await ws.send_bytes(item)
-                    else:
-                        await ws.send_json(item)
-                except Exception:
-                    # 发送失败(连接已断)：继续 drain 队列，不退出，防止后续 put 堆积死锁
-                    pass
+                # bytes → PCM 二进制帧；dict → JSON 标记(如句边界 seg)。同队列保证顺序
+                if not await _send_bounded(item):
+                    send_wedged = True
+                    pending = active_cancel["event"]
+                    if pending is not None:
+                        pending.set()
             finally:
                 queue.task_done()
 
@@ -3399,6 +3516,7 @@ async def ws_tts(ws: WebSocket):
             # 每个请求独立的取消信号：断连或收到任意消息时置位。
             # 注意：合成期间收到的消息只作为取消信号，消息内容会被丢弃；客户端若要继续合成需再发新请求。
             cancel_event = asyncio.Event()
+            active_cancel["event"] = cancel_event
 
             message = await ws.receive()
             if message["type"] == "websocket.disconnect":
@@ -3430,11 +3548,21 @@ async def ws_tts(ws: WebSocket):
 
             # reader 任务独占 ws.receive：合成期间监听客户端。收到任何消息(停止/新请求)
             # 或断连都立即置位 cancel_event，让合成循环中止，避免"停止后仍满载合成"。
+            # 必须把"已断连"回传主循环：Starlette 收到 websocket.disconnect 后会把
+            # client_state 置为 DISCONNECTED，此后再 receive 会抛 RuntimeError。若在此
+            # 静默吞掉，主循环下一轮 receive 就会以未捕获异常穿透 ASGI 层(合成中途按停止
+            # 是最常见操作，日志会被异常栈污染)。
+            watcher_saw_disconnect = False
+
             async def watch_cancel():
+                nonlocal watcher_saw_disconnect
                 try:
-                    await ws.receive()
+                    message = await ws.receive()
+                    if message.get("type") == "websocket.disconnect":
+                        watcher_saw_disconnect = True
                 except Exception:
-                    pass
+                    # 读失败本身即意味着连接不可再用，同样按断连处理。
+                    watcher_saw_disconnect = True
                 cancel_event.set()
 
             watcher = asyncio.create_task(watch_cancel())
@@ -3444,8 +3572,10 @@ async def ws_tts(ws: WebSocket):
                 async def run_synthesis():
                     if engine == "kokoro":
                         # 前端用 \n 连接合成单元(句/语言子片段)，按 \n 还原即 1:1 对齐，
-                        # 不再二次按标点切分，杜绝前后端句数漂移(变速续播时间线依赖此对齐)
-                        units = [u for u in text.split("\n") if u.strip()]
+                        # 不再二次按标点切分，杜绝前后端句数漂移(变速续播时间线依赖此对齐)。
+                        # 不过滤空单元：clean_text 保留行数，空行是前端某一句被整行清洗
+                        # 掉后的位置占位，必须保留，synth_kokoro 会为它发一个空 seg 保计数。
+                        units = text.split("\n")
                         produced_audio = await synth_kokoro(
                             units,
                             voice,
@@ -3486,8 +3616,32 @@ async def ws_tts(ws: WebSocket):
                 except asyncio.CancelledError:
                     pass
 
-            await queue.put(None)
-            await sender_task
+            # 收尾哨兵：队列可能仍是满的(sender 卡在半开连接的 send 上)，无界 put 会
+            # 把主循环自己钉死。sender 超时后转为纯 drain，队列很快排空；此处仍设上界，
+            # 保证任何情况下主循环都能走到 finally 去取消 sender，不泄漏 handler。
+            try:
+                if TTS_RESPONSE_WRITE_TIMEOUT_SECONDS:
+                    await asyncio.wait_for(
+                        queue.put(None),
+                        TTS_RESPONSE_WRITE_TIMEOUT_SECONDS,
+                    )
+                else:
+                    await queue.put(None)
+                await asyncio.wait_for(
+                    asyncio.shield(sender_task),
+                    TTS_RESPONSE_WRITE_TIMEOUT_SECONDS or None,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "WS sender 未能在 %ss 内收尾(疑似半开连接)：强制取消并断开",
+                    TTS_RESPONSE_WRITE_TIMEOUT_SECONDS,
+                )
+                sender_task.cancel()
+                raise WebSocketDisconnect(1001) from None
+            if watcher_saw_disconnect or send_wedged:
+                # 断连消息被 watcher 取走(或发送侧已判定连接不可用)，主循环不能再
+                # receive(会抛 RuntimeError)。走正常断连出口，交外层统一收尾。
+                raise WebSocketDisconnect(1000)
             if ws.client_state != WebSocketState.DISCONNECTED:
                 if synth_error is not None:
                     # 合成失败：回传 error 而非 end，让前端脱离"合成中"并提示，不伪装成功

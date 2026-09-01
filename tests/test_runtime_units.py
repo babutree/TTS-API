@@ -2,6 +2,7 @@
 """运行时内部单元测试：startup、run_kokoro、Edge 音色缓存、ffmpeg 命令、进程回收。"""
 import asyncio
 import inspect
+import logging
 import threading
 import time
 import unittest
@@ -1277,6 +1278,113 @@ class FfmpegLimiterTests(unittest.IsolatedAsyncioTestCase):
         dual.release(prefetch=True)
         self.assertTrue(await dual.acquire(prefetch=True))
         dual.release(prefetch=True)
+
+    def _capture_limiter_errors(self):
+        """收集 limiter 记录的 ERROR 行，用于断言配额记账损坏必须可见。"""
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                if record.levelno >= logging.ERROR:
+                    records.append(record.getMessage())
+
+        handler = Capture()
+        logger = self.app.logger
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
+        return records
+
+    async def test_balanced_release_does_not_log_an_error(self):
+        # 正常配对不得产生噪音，否则运维会学会忽略这条告警。
+        errors = self._capture_limiter_errors()
+        limiter = self.app.FfmpegLimiter(2)
+
+        self.assertTrue(await limiter.acquire())
+        limiter.release()
+        self.assertTrue(await limiter.acquire(prefetch=True))
+        limiter.release(prefetch=True)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(limiter.active, 0)
+        self.assertEqual(limiter.active_prefetch, 0)
+
+    async def test_extra_release_is_logged_instead_of_silently_clamped(self):
+        # 多释放会让计数低于真实进程数，随后 acquire 就会超发 ffmpeg。
+        # 计数仍夹在 0 以上(不允许变负)，但必须留下可诊断的 ERROR。
+        errors = self._capture_limiter_errors()
+        limiter = self.app.FfmpegLimiter(2)
+
+        self.assertTrue(await limiter.acquire())
+        limiter.release()
+        limiter.release()
+
+        self.assertEqual(limiter.active, 0)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("released more times than acquired", errors[0])
+
+    async def test_extra_prefetch_release_reports_both_counters(self):
+        errors = self._capture_limiter_errors()
+        limiter = self.app.FfmpegLimiter(3)
+
+        self.assertTrue(await limiter.acquire(prefetch=True))
+        limiter.release(prefetch=True)
+        limiter.release(prefetch=True)
+
+        self.assertEqual(limiter.active, 0)
+        self.assertEqual(limiter.active_prefetch, 0)
+        self.assertEqual(len(errors), 2, errors)
+        self.assertIn("released more times than acquired", errors[0])
+        self.assertIn("prefetch counter released below zero", errors[1])
+
+    async def test_real_reap_paths_do_not_trip_the_release_guard(self):
+        # 真实回收路径必须零告警，否则守卫会被当成噪音而被改回静默。
+        errors = self._capture_limiter_errors()
+        limiter = self.app._ffmpeg_limiter
+
+        class Stdin:
+            def write(self, data):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+        class Proc:
+            def __init__(self):
+                self.stdin = Stdin()
+                self.returncode = None
+                self.pid = 4242
+
+            def kill(self):
+                self.returncode = -9
+
+            async def wait(self):
+                return self.returncode
+
+        original_active = limiter.active
+        original_prefetch = limiter.active_prefetch
+        try:
+            limiter.active = 1
+            limiter.active_prefetch = 0
+            await self.app._reap_proc(Proc())
+            self.assertEqual(limiter.active, 0)
+
+            limiter.active = 1
+            await self.app._reap_edge_pcm_decoder(Proc(), prefetch=False)
+            self.assertEqual(limiter.active, 0)
+
+            limiter.active = 1
+            limiter.active_prefetch = 1
+            await self.app._reap_edge_pcm_decoder(Proc(), prefetch=True)
+            self.assertEqual(limiter.active, 0)
+            self.assertEqual(limiter.active_prefetch, 0)
+        finally:
+            limiter.active = original_active
+            limiter.active_prefetch = original_prefetch
+
+        self.assertEqual(errors, [])
 
 
 class ReapProcTests(unittest.IsolatedAsyncioTestCase):
