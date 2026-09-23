@@ -985,13 +985,19 @@ def clean_text(text: str) -> str:
         lambda m: "\n" * m.group(0).count("\n"),
         text,
     )
-    text = re.sub(r'`([^`]*)`', r'\1', text)            # 行内代码
-    text = re.sub(r'!\[[^\]]*\]\([^)]*\)', '', text)    # 图片
-    text = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', text)  # 链接保留文字
-    text = re.sub(r'^\s{0,3}#{1,6}\s*', '', text, flags=re.MULTILINE)  # 标题 #
-    text = re.sub(r'^\s{0,3}>\s?', '', text, flags=re.MULTILINE)        # 引用 >
-    text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)        # 无序列表
-    text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)        # 有序列表
+    # 行内结构(代码/图片/链接)一律不跨行：字符类含 \n 会把跨行配对之间的
+    # 换行整段吞掉，行数减少即前后端 seg 计数错位(围栏规则显式保留换行)。
+    text = re.sub(r'`([^`\n]*)`', r'\1', text)              # 行内代码
+    text = re.sub(r'!\[[^\]\n]*\]\([^)\n]*\)', '', text)    # 图片
+    text = re.sub(r'\[([^\]\n]*)\]\([^)\n]*\)', r'\1', text)  # 链接保留文字
+    # 标题/引用/列表规则的水平空白一律用 [^\S\n] 而非 \s：\s 含换行，
+    # 行尾标记(如空标题"#"+换行)、空列表项("*"+换行)或行首 \s{0,3} 跨越
+    # 空行时都会连带吞掉换行，行数随之减少，前后端 seg 计数错位
+    # (分隔线规则 [^\S\n] 的同一教训)。
+    text = re.sub(r'^[^\S\n]{0,3}#{1,6}[^\S\n]*', '', text, flags=re.MULTILINE)  # 标题 #
+    text = re.sub(r'^[^\S\n]{0,3}>[^\S\n]?', '', text, flags=re.MULTILINE)       # 引用 >
+    text = re.sub(r'^[^\S\n]*[-*+][^\S\n]+', '', text, flags=re.MULTILINE)       # 无序列表
+    text = re.sub(r'^[^\S\n]*\d+\.[^\S\n]+', '', text, flags=re.MULTILINE)       # 有序列表
     # ``*`` 在纯文本里既可表示 Markdown，又可表示乘法/乘方，无法无歧义推断。
     # 采用保守策略：保护完整的 Unicode 单星号运算链，以及完整的 ASCII
     # ``**`` 乘方链；CJK 或混合脚本相邻的双星号仍按 Markdown 处理。先保护、
@@ -3451,7 +3457,11 @@ async def ws_tts(ws: WebSocket):
         and not _key_matches(provided_key)
         and not _is_same_origin(ws.headers)
     ):
-        await ws.close(code=1008)
+        # close 失败(传输已死)没有可恢复动作:吞掉按断连收尾,不让异常穿透 ASGI 层。
+        try:
+            await ws.close(code=1008)
+        except Exception:
+            pass
         return
     await ws.accept()
 
@@ -3491,6 +3501,22 @@ async def ws_tts(ws: WebSocket):
             # 发送失败(连接已断)：继续 drain 队列，不退出，防止后续 put 堆积死锁
             return True
 
+    async def _send_control(item: dict) -> bool:
+        # 主循环控制帧(start/end/error)不经 sender 队列、由主循环直发。与 _send_bounded
+        # 的数据帧语义不同：控制帧失败(超时或传输错误)即连接不可用,返回 False 让
+        # 主循环按断连收尾——若放任异常逃逸,会穿透到 ASGI 层变成 "Exception in ASGI
+        # application" 噪音;连接已坏时继续循环也没有意义(下一帧同样发不出去)。
+        try:
+            if TTS_RESPONSE_WRITE_TIMEOUT_SECONDS:
+                await asyncio.wait_for(
+                    ws.send_json(item), TTS_RESPONSE_WRITE_TIMEOUT_SECONDS
+                )
+            else:
+                await ws.send_json(item)
+            return True
+        except Exception:
+            return False
+
     async def sender():
         nonlocal send_wedged
         while True:
@@ -3522,21 +3548,37 @@ async def ws_tts(ws: WebSocket):
             if message["type"] == "websocket.disconnect":
                 raise WebSocketDisconnect(message.get("code", 1000))
             if message.get("bytes") is not None:
-                await ws.close(code=1003)
+                # 同上:close 失败只意味着连接已死,吞掉后按断连收尾。
+                try:
+                    await ws.close(code=1003)
+                except Exception:
+                    pass
                 return
             msg = message.get("text")
             if msg is None:
-                await ws.send_json({"type": "error", "message": "请求必须使用文本 JSON 帧"})
+                if not await _send_control({"type": "error", "message": "请求必须使用文本 JSON 帧"}):
+                    raise WebSocketDisconnect(1000)
+                continue
+            # 帧级长度上限：合法请求的 JSON 转义开销最坏 12 倍于 text 上限——非 BMP
+            # 字符被 ensure_ascii 序列化成代理对 \uXXXX\uXXXX(每字符 12 字节文本)。
+            # 超出即可判定不合法,必须在 json.loads 之前拦截——否则超限帧会先整块
+            # 进内存完成解析,才被 parse_ws_request 的 MAX_TEXT_LENGTH 拒绝。
+            # 余量 4096 覆盖 JSON 信封与客户端附加字段的开销,防止合法 text 被误杀。
+            if len(msg) > MAX_TEXT_LENGTH * 12 + 4096:
+                if not await _send_control({"type": "error", "message": f"请求帧过大（文本最大 {MAX_TEXT_LENGTH} 字）"}):
+                    raise WebSocketDisconnect(1000)
                 continue
             try:
                 req = json.loads(msg)
             except (ValueError, TypeError):
-                await ws.send_json({"type": "error", "message": "无效的 JSON 请求"})
+                if not await _send_control({"type": "error", "message": "无效的 JSON 请求"}):
+                    raise WebSocketDisconnect(1000)
                 continue
 
             parsed = parse_ws_request(req)
             if parsed["type"] == "error":
-                await ws.send_json(parsed)
+                if not await _send_control(parsed):
+                    raise WebSocketDisconnect(1000)
                 continue
 
             text = parsed["text"]
@@ -3544,7 +3586,8 @@ async def ws_tts(ws: WebSocket):
             voice = parsed["voice"]
             speed = parsed["speed"]
 
-            await ws.send_json({"type": "start"})
+            if not await _send_control({"type": "start"}):
+                raise WebSocketDisconnect(1000)
 
             # reader 任务独占 ws.receive：合成期间监听客户端。收到任何消息(停止/新请求)
             # 或断连都立即置位 cancel_event，让合成循环中止，避免"停止后仍满载合成"。
@@ -3643,11 +3686,16 @@ async def ws_tts(ws: WebSocket):
                 # receive(会抛 RuntimeError)。走正常断连出口，交外层统一收尾。
                 raise WebSocketDisconnect(1000)
             if ws.client_state != WebSocketState.DISCONNECTED:
-                if synth_error is not None:
-                    # 合成失败：回传 error 而非 end，让前端脱离"合成中"并提示，不伪装成功
-                    await ws.send_json({"type": "error", "message": "合成失败，请重试或更换音色"})
-                else:
-                    await ws.send_json({"type": "end"})
+                # 合成失败回传 error 而非 end，让前端脱离"合成中"并提示，不伪装成功。
+                # 控制帧发送失败即连接不可用(send 曾失败但 client_state 尚未反映、或
+                # 恰在此刻断开)，按断连收尾,不让异常穿透到 ASGI 层。
+                final_frame = (
+                    {"type": "error", "message": "合成失败，请重试或更换音色"}
+                    if synth_error is not None
+                    else {"type": "end"}
+                )
+                if not await _send_control(final_frame):
+                    raise WebSocketDisconnect(1000)
 
             sender_task = asyncio.create_task(sender())
 
@@ -3656,3 +3704,11 @@ async def ws_tts(ws: WebSocket):
     finally:
         if sender_task and not sender_task.done():
             sender_task.cancel()
+        if sender_task is not None:
+            # 只 cancel 不 await 会让任务以未消费状态留给事件循环,进程/连接收尾时
+            # 可能报 "Task was destroyed but it is pending"。sender 自身不产生
+            # 异常(其内部已兜底),这里只需吸收取消终态。
+            try:
+                await sender_task
+            except asyncio.CancelledError:
+                pass

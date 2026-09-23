@@ -60,6 +60,11 @@ class HttpApiTests(unittest.TestCase):
 
     def test_health_returns_200_when_ready(self):
         self._mark_ready()
+        # 套件封闭性约定(AGENTS: no ffmpeg required)：不依赖宿主机 PATH
+        # 里是否恰好装了 ffmpeg，显式钉住 which 结果。
+        old_which = shutil.which
+        self.addCleanup(setattr, shutil, "which", old_which)
+        self.app.shutil.which = lambda name: "ffmpeg" if name == "ffmpeg" else old_which(name)
 
         resp = self.client.get("/")
 
@@ -72,6 +77,9 @@ class HttpApiTests(unittest.TestCase):
     def test_health_returns_503_when_ffmpeg_missing(self):
         self._mark_ready()
         old_which = shutil.which
+        # app.shutil 即全局 shutil 模块：patch 必须恢复，否则泄漏到同进程
+        # 后续任意测试(乱序实验 seed=11 实证过该顺序依赖)。
+        self.addCleanup(setattr, shutil, "which", old_which)
         self.app.shutil.which = lambda name: None if name == "ffmpeg" else old_which(name)
 
         resp = self.client.get("/")
@@ -83,6 +91,8 @@ class HttpApiTests(unittest.TestCase):
 
     def test_health_reports_ready_when_ffmpeg_available(self):
         self._mark_ready()
+        old_which = shutil.which
+        self.addCleanup(setattr, shutil, "which", old_which)
         self.app.shutil.which = lambda name: "C:/ffmpeg/bin/ffmpeg.exe" if name == "ffmpeg" else None
 
         resp = self.client.get("/")

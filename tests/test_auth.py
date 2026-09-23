@@ -9,6 +9,7 @@
 - /api/auth 探针不吃同源豁免，必须真正校验密钥。
 """
 import os
+import shutil
 import unittest
 
 from starlette.testclient import TestClient
@@ -132,7 +133,10 @@ class MiddlewareEnforcedModeTests(unittest.TestCase):
         self.client = TestClient(self.app.app)
 
     def test_exempt_root_allowed_without_key(self):
-        self.app.shutil.which = lambda name: "ffmpeg" if name == "ffmpeg" else None
+        # app.shutil 即全局 shutil 模块：patch 必须恢复，防止泄漏到同进程后续用例。
+        old_which = shutil.which
+        self.addCleanup(setattr, shutil, "which", old_which)
+        self.app.shutil.which = lambda name: "ffmpeg" if name == "ffmpeg" else old_which(name)
         self.assertEqual(self.client.get("/").status_code, 200)
 
     def test_protected_route_rejected_without_key(self):

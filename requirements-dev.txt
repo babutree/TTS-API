@@ -2,3 +2,7 @@
 
 # Required by starlette.testclient used in the unittest suite.
 httpx==0.28.1
+# Branch-coverage measurement for the suite:
+#   coverage run --branch -m unittest discover -s tests -p "test_*.py"
+#   coverage report -m --include="app.py"
+coverage==7.13.0

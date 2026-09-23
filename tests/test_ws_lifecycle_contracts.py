@@ -231,6 +231,86 @@ class HalfOpenConnectionTests(unittest.IsolatedAsyncioTestCase):
         await self._run_half_open(1.0)
 
 
+class ControlFrameSendFailureTests(unittest.IsolatedAsyncioTestCase):
+    """回归锁：控制帧(error/start/end)发送失败时 handler 必须干净退出。
+
+    审计发现：主循环的控制帧曾绕开 _send_bounded 直发，连接已坏但
+    client_state 尚未反映时，send 异常会穿透 ASGI 层(污染服务日志)。
+    修复后失败即视为断连：走统一出口，不抛异常、不挂起。
+    """
+
+    async def asyncSetUp(self):
+        self.app = import_app_with_fakes()
+        self.app.logger.disabled = True
+
+    async def asyncTearDown(self):
+        self.app.logger.disabled = False
+
+    async def _run_handler(self, request_text, send):
+        incoming = asyncio.Queue()
+        await incoming.put({"type": "websocket.connect"})
+        await incoming.put({"type": "websocket.receive", "text": request_text})
+
+        async def receive():
+            return await incoming.get()
+
+        handler = asyncio.create_task(self.app.app(ws_scope(), receive, send))
+        try:
+            # 干净退出 = 不抛异常、不永久挂起；任一违背此处即失败
+            await asyncio.wait_for(asyncio.shield(handler), 5)
+        finally:
+            if not handler.done():
+                handler.cancel()
+
+    async def test_parse_error_frame_send_failure_exits_cleanly(self):
+        sent = []
+
+        async def send(message):
+            if message["type"] == "websocket.send":
+                raise RuntimeError("client is gone")
+            sent.append(message["type"])
+
+        await self._run_handler("not-json{", send)
+        self.assertEqual(sent, ["websocket.accept"])
+
+    async def test_start_frame_send_failure_exits_cleanly(self):
+        async def send(message):
+            if message["type"] == "websocket.send":
+                raise RuntimeError("client is gone")
+
+        await self._run_handler(
+            json.dumps({"text": "hi", "engine": "kokoro", "voice": "af_heart"}),
+            send,
+        )
+
+    async def test_end_frame_send_failure_exits_cleanly(self):
+        async def fake_run_kokoro(
+            text, voice, speed, cancel_event=None, permit=None
+        ):
+            return b"\x00\x01" * 16
+
+        self.app.run_kokoro = fake_run_kokoro
+
+        async def send(message):
+            # 用 JSON 解析而非子串匹配：send_json 是紧凑分隔符({"type":"end"})，
+            # 子串易随序列化风格漂移而失配。
+            if (
+                message["type"] == "websocket.send"
+                and isinstance(message.get("text"), str)
+            ):
+                try:
+                    payload = json.loads(message["text"])
+                except ValueError:
+                    return
+                if isinstance(payload, dict) and payload.get("type") == "end":
+                    raise RuntimeError("client is gone")
+
+        await self._run_handler(
+            json.dumps({"text": "hi", "engine": "kokoro", "voice": "af_heart"}),
+            send,
+        )
+
+
 class RunCountSegParityTests(unittest.IsolatedAsyncioTestCase):
     """跨端对偶：前端 run.count 必须等于后端为该 run 发出的 seg 数。
 

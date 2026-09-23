@@ -26,7 +26,7 @@ class FakeStdin:
         self.closed = True
 
 
-class FakeProc:
+class ReapFakeProc:
     def __init__(self, kill_exc=None, never_exits=False, returncode=None):
         self.stdin = FakeStdin()
         self.returncode = returncode
@@ -65,7 +65,7 @@ class BoundedReapTests(unittest.IsolatedAsyncioTestCase):
     async def test_unkillable_edge_decoder_releases_quota_within_bound(self):
         limiter = self.app._ffmpeg_limiter
         limiter.active = 1
-        proc = FakeProc(kill_exc=PermissionError("EPERM"), never_exits=True)
+        proc = ReapFakeProc(kill_exc=PermissionError("EPERM"), never_exits=True)
 
         returncode = await asyncio.wait_for(
             self.app._reap_edge_pcm_decoder(proc, prefetch=False), 2.0
@@ -77,7 +77,7 @@ class BoundedReapTests(unittest.IsolatedAsyncioTestCase):
     async def test_unkillable_rest_encoder_releases_quota_within_bound(self):
         limiter = self.app._ffmpeg_limiter
         limiter.active = 1
-        proc = FakeProc(kill_exc=PermissionError("EPERM"), never_exits=True)
+        proc = ReapFakeProc(kill_exc=PermissionError("EPERM"), never_exits=True)
 
         await asyncio.wait_for(self.app._reap_proc(proc), 2.0)
 
@@ -86,7 +86,7 @@ class BoundedReapTests(unittest.IsolatedAsyncioTestCase):
     async def test_normal_kill_path_still_reports_real_returncode(self):
         limiter = self.app._ffmpeg_limiter
         limiter.active = 1
-        proc = FakeProc()
+        proc = ReapFakeProc()
 
         returncode = await self.app._reap_edge_pcm_decoder(proc, prefetch=False)
 
@@ -97,7 +97,7 @@ class BoundedReapTests(unittest.IsolatedAsyncioTestCase):
     async def test_already_exited_process_is_not_killed_again(self):
         limiter = self.app._ffmpeg_limiter
         limiter.active = 1
-        proc = FakeProc(returncode=0)
+        proc = ReapFakeProc(returncode=0)
 
         returncode = await self.app._reap_edge_pcm_decoder(proc, prefetch=False)
 
@@ -117,7 +117,7 @@ class EdgeFeedCloseOrderTests(unittest.IsolatedAsyncioTestCase):
         self.app.logger.disabled = False
 
     async def test_aclose_failure_keeps_upstream_error_and_closes_stdin(self):
-        proc = FakeProc()
+        proc = ReapFakeProc()
 
         class FailingStream:
             def __aiter__(self):
@@ -159,7 +159,7 @@ class EdgeFeedCloseOrderTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(proc.stdin.closed)
 
     async def test_cancellation_during_close_still_propagates(self):
-        proc = FakeProc()
+        proc = ReapFakeProc()
         logger = self.app.logger
 
         class CancelOnClose:

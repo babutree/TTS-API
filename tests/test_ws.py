@@ -166,6 +166,43 @@ class WsRequestValidationTests(unittest.TestCase):
             _, terminal = _collect_until_terminal(ws)
             self.assertEqual(terminal, "end")
 
+    def test_oversized_frame_rejected_before_json_parse_and_keeps_alive(self):
+        # 帧级长度门必须早于 json.loads：用"语法不完整且超限"的帧验证判定顺序——
+        # 若先解析会报"无效的 JSON 请求"，先到长度门则报"过大"。
+        # 长度门为 MAX_TEXT_LENGTH*12+1024(非 BMP 代理对转义最坏 12 倍)，帧须大于它。
+        oversized = '{"text":"' + "a" * 1300000 + '"'  # 截断，语法不完整
+        with self.client.websocket_connect("/ws/tts") as ws:
+            ws.send_text(oversized)
+            msg = ws.receive_json()
+            self.assertEqual(msg["type"], "error")
+            self.assertIn("过大", msg["message"])
+            # 连接保活：随后一个合法请求应可完成。
+            ws.send_json({"text": "hi", "engine": "kokoro", "voice": "af_heart"})
+            _, terminal = _collect_until_terminal(ws)
+            self.assertEqual(terminal, "end")
+
+    def test_maximum_legal_frame_passes_length_gate(self):
+        # 长度门的对偶边界：两类最坏合法帧都不得被误杀。
+        # - 引号/反斜杠转义约 2 倍于 text 长度；
+        # - 非 BMP 字符(emoji)被 ensure_ascii 序列化成代理对 \uXXXX\uXXXX，
+        #   恰为 12 倍——锁住"倍数被调小导致合法帧被误杀"的回归。
+        import json
+
+        heavy_cases = (
+            ("2x_escape_quote_backslash", "\\" * 100000),
+            ("12x_escape_astral_surrogate_pair", "\U0001F600" * 100000),
+        )
+        for label, heavy in heavy_cases:
+            with self.subTest(case=label):
+                with self.client.websocket_connect("/ws/tts") as ws:
+                    ws.send_text(
+                        json.dumps(
+                            {"text": heavy, "engine": "kokoro", "voice": "af_heart"}
+                        )
+                    )
+                    _, terminal = _collect_until_terminal(ws)
+                    self.assertEqual(terminal, "end")
+
     def test_missing_text_returns_error(self):
         with self.client.websocket_connect("/ws/tts") as ws:
             ws.send_json({"engine": "kokoro"})

@@ -102,7 +102,7 @@ TTS-API 把两个引擎挂在同一个 FastAPI 服务上。浏览器与 REST / W
    - `TTS_MAX_SYNTHESIS_CONCURRENCY` — Kokoro 推理并发上限，REST 与 WebSocket 共用（默认 `2`）。采用排队等待而非拒绝；防止大量请求占着线程池 worker 阻塞在语言锁上，拖垮整个线程池。
    - `TTS_MAX_SYNTHESIS_WAITERS` — 普通 Kokoro 请求的等待队列上限，不含正在推理者（默认 `16`）；超限显式失败。所有推理槽都忙时，UI 投机预取直接回退，不占普通等待名额。
    - `TTS_MAX_REQUEST_BODY_BYTES` — HTTP 请求体字节上限，同时约束声明长度和 chunked 实际累计大小（默认 `1048576`）。
-   - `TTS_RESPONSE_WRITE_TIMEOUT_SECONDS` — 慢速 HTTP 客户端的单次响应块写入超时（默认 `30` 秒；`0` 表示关闭）。请求任务取消时也会取消并等待挂起的子写入，再展开合成清理。
+   - `TTS_RESPONSE_WRITE_TIMEOUT_SECONDS` — 慢速 HTTP 客户端的单次响应块写入超时，兼作 WebSocket 单帧发送超时（默认 `30` 秒；`0` 表示关闭）。请求任务取消时也会取消并等待挂起的子写入，再展开合成清理。置 `0` 时，半开的 WebSocket 客户端（在线但不读取）可能让 sender 与已满的输出队列永久挂起，连带钉死 handler 持有的合成槽位——不可信网络环境下请保持非零。
    - `KOKORO_MAX_UNIT_CHARS` — Kokoro 单次内部推理片段最大字符数（默认 `2000`）。更长的合法单元会内部切分，但不会新增 WebSocket `seg`；硬切可能改变韵律，仍需真实听测。
    - `volumes` — `./models:/app/models` 缓存 Kokoro 模型权重，容器重建无需重新下载。
    - `ports` — 映射 `8880` 供本机直连。若要用外部反代网络（如 Caddy 的 `caddy_net`），先 `docker network create caddy_net`，再取消 `docker-compose.yml` 里可选的 `networks` 注释块。
