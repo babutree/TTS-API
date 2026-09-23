@@ -2624,6 +2624,39 @@ globalThis.AudioContext = class {
 
 
 class UnicodeBoundaryContractTests(unittest.TestCase):
+    def test_auto_letterless_separator_units_inherit_language_not_en(self):
+        # 回归锁：无字母单元(如 "---" 分隔线)曾被 isZh??false 判成英文段——
+        # auto 模式为每个分隔线单独开出 en run，其文本清洗后为空、后端必回
+        # error，前端 failCurrentStream 整场停止(线上 5377 字文本实测)。
+        assertions = r"""
+(async () => {
+  await voicesPromise;
+  document.getElementById('engine').value = 'auto';
+  document.getElementById('voiceZh').value = 'zh-CN-XiaoxiaoNeural';
+  document.getElementById('voiceEnAuto').value = 'en-US-AvaNeural';
+
+  document.getElementById('t').value = '甲。\n---\n乙。\n---\n丙。';
+  allSentences = computeSentences();
+  const runs = buildRunsFrom(0);
+  equal(runs.length, 1, 'letterless separators must not spawn phantom en runs');
+  equal(runs[0].count, 5, 'all five units stay inside one run');
+  assertOk(runs[0].voice !== 'en-US-AvaNeural', 'letterless units must not route to the en voice');
+  equal(runs[0].text.split('\n').length, 5, 'server receives one line per unit (count parity)');
+
+  document.getElementById('t').value = '---';
+  const onlySep = computeSentences();
+  equal(onlySep.length, 1, 'separator-only text yields one unit');
+  assertOk(onlySep[0].voice !== 'en-US-AvaNeural', 'letterless unit with no predecessor must not route to the en voice');
+
+  document.getElementById('t').value = '中文A。hello。';
+  const mixed = computeSentences();
+  equal(mixed.length, 3, 'normal mixed-language split unchanged');
+  equal(mixed[1].voice, 'en-US-AvaNeural', 'latin seg still routes to the en voice');
+  finish();
+})().catch(err => { throw err; });
+"""
+        run_node_contract("index.html", PREFETCH_CONTROLLED_SETUP, assertions)
+
     def test_text_limit_counts_astral_code_points_without_splitting_surrogate(self):
         setup = r"""
 globalThis.fetch = async (url) => {
