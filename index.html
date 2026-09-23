@@ -1387,6 +1387,8 @@ function beginPrefetch(targetRunIndex) {
         try {
             const meta = JSON.parse(e.data);
             if (meta.type === "start") touchInactivity();
+            // 合成心跳：与主路径同理，证明生成仍存活(不计入 segOffsets)。
+            if (meta.type === "ping") touchInactivity();
             // 与主路径一致：seg 标记「下一单元音频」起点 = 当前已收样本数
             if (meta.type === "seg") {
                 touchInactivity();
@@ -1580,6 +1582,12 @@ function sendRequest() {
         let meta;
         try { meta = JSON.parse(e.data); } catch (_) { return; }
         if (meta.type === "start") {
+            armMainInactivityDeadline();
+            return;
+        }
+        // 合成心跳：Edge 长文本/长单元推理存在远超预期的无帧间隙，
+        // ping 仅用于证明连接与生成仍存活，不计入句级时间线。
+        if (meta.type === "ping") {
             armMainInactivityDeadline();
             return;
         }

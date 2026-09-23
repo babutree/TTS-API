@@ -50,6 +50,9 @@ DEFAULT_MAX_REQUEST_BODY_BYTES = 1024 * 1024
 DEFAULT_RESPONSE_WRITE_TIMEOUT_SECONDS = 30.0
 DEFAULT_KOKORO_MAX_UNIT_CHARS = 2000
 EDGE_DECODER_EXIT_GRACE_SECONDS = 1.0
+# WS 合成心跳间隔：必须显著小于前端 WS_INACTIVITY_TIMEOUT_MS(60s)，
+# 保证最坏生成间隙下前端也不会误判流死亡。
+WS_HEARTBEAT_INTERVAL_SECONDS = 15.0
 # kill() 失败(EPERM 等)后等待子进程退出的上界。超过则放弃等待并释放配额：
 # 继续无界等待会让该 ffmpeg 槽永久不可用，默认只有 2 个槽，重复发生即服务瘫痪。
 # 放弃等待意味着可能残留孤儿进程，因此必须记 error 级日志供运维介入。
@@ -3514,7 +3517,13 @@ async def ws_tts(ws: WebSocket):
             else:
                 await ws.send_json(item)
             return True
-        except Exception:
+        except Exception as exc:
+            # 静默关闭曾是诊断盲区(服务器日志只剩 connection closed，
+            # 无从分辨断连原因)，必须留下可观测痕迹。
+            logger.warning(
+                "WS 控制帧(%s)发送失败，按断连收尾: %s",
+                item.get("type", "?"), exc,
+            )
             return False
 
     async def sender():
@@ -3636,14 +3645,41 @@ async def ws_tts(ws: WebSocket):
                             prefetch=is_prefetch,
                         )
 
+                async def run_with_heartbeat():
+                    # 心跳：Edge/Kokoro 合成存在"生成间隙"(整段 edge 只有一个 seg，
+                    # 长单元推理可达分钟级；上游限流时间隙更长)。前端主 socket
+                    # 60s 收不到任何帧即判流死亡并断开(误杀慢生成)。ping 经队列
+                    # 走 sender 串行发送(与数据帧同序、避免并发 send)，前端把
+                    # ping 计入活动即可保持连接；queue 满时静默跳过本次心跳。
+                    stop = asyncio.Event()
+
+                    async def beat():
+                        while not stop.is_set():
+                            try:
+                                await asyncio.wait_for(
+                                    stop.wait(), WS_HEARTBEAT_INTERVAL_SECONDS
+                                )
+                            except asyncio.TimeoutError:
+                                try:
+                                    queue.put_nowait({"type": "ping"})
+                                except asyncio.QueueFull:
+                                    pass
+
+                    beat_task = asyncio.create_task(beat())
+                    try:
+                        await run_synthesis()
+                    finally:
+                        stop.set()
+                        await _await_cleanup(beat_task)
+
                 if TTS_SYNTHESIS_TIMEOUT_SECONDS:
                     try:
-                        await asyncio.wait_for(run_synthesis(), TTS_SYNTHESIS_TIMEOUT_SECONDS)
+                        await asyncio.wait_for(run_with_heartbeat(), TTS_SYNTHESIS_TIMEOUT_SECONDS)
                     except asyncio.TimeoutError as e:
                         cancel_event.set()
                         raise TimeoutError("synthesis timed out") from e
                 else:
-                    await run_synthesis()
+                    await run_with_heartbeat()
             except Exception as e:
                 # 合成期异常(非法 Edge 音色/引擎故障等)不得击穿主循环断连：记录日志 + 回传错误，
                 # 保活连接以处理后续请求。这是长驻循环的正确控制流，非静默 fallback(错误已显式暴露)。

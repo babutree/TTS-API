@@ -559,16 +559,34 @@ class WsControlFrameFailureTests(unittest.IsolatedAsyncioTestCase):
         抛错或挂起都会让用例失败。各用例再叠加显式的帧序列断言。
         """
         incoming = _REAL_QUEUE()
+        deferred_disconnect = None
         for item in incoming_items:
-            await incoming.put(item)
+            # 断连消息延迟到 run 终态(end)之后投递：心跳封装多出一次调度点，
+            # 先到的 disconnect 会被 watcher 消费并取消合成，end 永不发出
+            # (产品语义：客户端已断则不发 end，测试不应依赖竞态运气)。
+            if item.get("type") == "websocket.disconnect":
+                deferred_disconnect = item
+            else:
+                await incoming.put(item)
+        saw_end = asyncio.Event()
 
         async def receive():
+            # 先排空真实消息(connect/request/二进制帧)；队列空后才允许
+            # 延迟断连生效(且必须等 end 已交付，否则合成会被提前取消)。
+            if not incoming.empty():
+                return await incoming.get()
+            if deferred_disconnect is not None:
+                await saw_end.wait()
+                return deferred_disconnect
             return await incoming.get()
 
         frames = []
 
         async def tracked_send(message):
             frames.append(message["type"])
+            text = message.get("text")
+            if isinstance(text, str) and '"end"' in text:
+                saw_end.set()
             await send(message)
 
         handler = asyncio.create_task(
@@ -1357,6 +1375,132 @@ class MeasuredGapUnits(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(produced)
         self.assertEqual(drain_all(queue), [])
+
+
+class WsHeartbeatTests(unittest.IsolatedAsyncioTestCase):
+    """跨端时序活性契约：合成存续期间帧间隔必须小于前端无活动阈值(60s)。
+
+    缺陷模式(八维体检漏掉的"第 9 维"——跨端时序契约)：Edge 长文本存在
+    远超预期的生成间隙(整段单 seg + 上游限流)，前端 60s 无帧即判流死亡。
+    修复=后端周期性 ping。本类把"慢合成必有心跳、心跳不打乱 seg 对偶"
+    与"控制帧失败必须留痕"锁为回归。
+    """
+
+    async def asyncSetUp(self):
+        self.app = import_app_with_fakes()
+        # 注意：本类不静音 logger(可观测性断言需要)；心跳驱动的纯流程不产生日志。
+        self.app.WS_HEARTBEAT_INTERVAL_SECONDS = 0.05
+
+    async def _run_collecting(self, request_payloads, send):
+        incoming = _REAL_QUEUE()
+        deferred_disconnect = None
+        for item in request_payloads:
+            if item.get("type") == "websocket.disconnect":
+                deferred_disconnect = item  # 与 _run_handler 同理：终态后再断连
+            else:
+                await incoming.put(item)
+        saw_end = asyncio.Event()
+
+        async def receive():
+            # 先排空真实消息(connect/request/二进制帧)；队列空后才允许
+            # 延迟断连生效(且必须等 end 已交付，否则合成会被提前取消)。
+            if not incoming.empty():
+                return await incoming.get()
+            if deferred_disconnect is not None:
+                await saw_end.wait()
+                return deferred_disconnect
+            return await incoming.get()
+
+        async def tracking_send(message):
+            text = message.get("text")
+            if isinstance(text, str) and '"end"' in text:
+                saw_end.set()
+            await send(message)
+
+        handler = asyncio.create_task(
+            self.app.app(ws_scope(), receive, tracking_send)
+        )
+        try:
+            await asyncio.wait_for(asyncio.shield(handler), 10)
+        finally:
+            if not handler.done():
+                handler.cancel()
+            await asyncio.gather(handler, return_exceptions=True)
+
+    async def test_slow_synthesis_emits_pings_without_touching_seg_count(self):
+        import logging as logging_mod
+
+        segs, pings, ends = [], [], []
+
+        async def send(message):
+            if message["type"] != "websocket.send":
+                return
+            text = message.get("text")
+            if not isinstance(text, str):
+                return
+            try:
+                payload = json.loads(text)
+            except ValueError:
+                return
+            kind = payload.get("type")
+            if kind == "seg":
+                segs.append(payload)
+            elif kind == "ping":
+                pings.append(payload)
+            elif kind == "end":
+                ends.append(payload)
+
+        async def slow_kokoro(text, voice, speed, cancel_event=None, permit=None):
+            await asyncio.sleep(0.2)  # 远大于心跳间隔，逼迫心跳出手
+            return b"\x00\x01" * 16
+
+        self.app.run_kokoro = slow_kokoro
+        logger = logging_mod.getLogger("tts-api")
+        with self.assertNoLogs(logger, level="ERROR"):
+            await self._run_collecting(
+                [
+                    {"type": "websocket.connect"},
+                    {
+                        "type": "websocket.receive",
+                        "text": json.dumps(
+                            {
+                                "text": "一" + chr(10) + "二" + chr(10) + "三",
+                                "engine": "kokoro",
+                                "voice": "af_heart",
+                            }
+                        ),
+                    },
+                    {"type": "websocket.disconnect", "code": 1000},
+                ],
+                send,
+            )
+        self.assertGreaterEqual(len(pings), 1, "慢合成期间必须有心跳帧")
+        self.assertEqual(len(segs), 3, "心跳不得增减 seg 计数(前后端对偶)")
+        self.assertEqual(len(ends), 1)
+
+    async def test_control_send_failure_leaves_warning_log(self):
+        import logging as logging_mod
+
+        async def send(message):
+            if message["type"] == "websocket.send":
+                raise RuntimeError("client is gone")
+
+        logger = logging_mod.getLogger("tts-api")
+        with self.assertLogs(logger, level="WARNING") as captured:
+            await self._run_collecting(
+                [
+                    {"type": "websocket.connect"},
+                    {"type": "websocket.receive", "text": "not-json{"},
+                    {"type": "websocket.disconnect", "code": 1000},
+                ],
+                send,
+            )
+        # 可观测性回归锁：v0.12.3 曾把控制帧失败改成静默关闭，服务器日志
+        # 只剩 connection closed，线上问题(长文本误断)因此无从取证。
+        self.assertTrue(
+            any("控制帧" in line for line in captured.output),
+            captured.output,
+        )
 
 
 if __name__ == "__main__":

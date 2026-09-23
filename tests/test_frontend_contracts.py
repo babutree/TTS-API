@@ -2509,6 +2509,9 @@ globalThis.AudioContext = class {
 
   mainSock.pushJson({ type: 'unknown' });
   equal(mainInactivityTimer, startId, 'unknown metadata cannot keep a silent connection alive');
+  mainSock.pushJson({ type: 'ping' });
+  const pingId = must(mainInactivityTimer, 'synthesis heartbeat must rearm inactivity');
+  assertOk(pingId !== startId, 'ping replaces the previous inactivity timer');
   mainSock.pushJson({ type: 'seg' });
   const segId = must(mainInactivityTimer, 'seg must rearm inactivity');
   assertOk(segId !== startId, 'seg replaces the start timer');
@@ -2553,6 +2556,9 @@ globalThis.AudioContext = class {
   assertOk(!state1.error, 'stale future timer cannot fail an active slot');
   state1.ws.pushJson({ type: 'unknown' });
   equal(prefetchInactivityTimers.get(state1), startTimerId, 'unknown future metadata cannot rearm inactivity');
+  state1.ws.pushJson({ type: 'ping' });
+  const futurePingId = must(prefetchInactivityTimers.get(state1), 'heartbeat must rearm future inactivity');
+  assertOk(futurePingId !== startTimerId, 'future ping replaces its inactivity timer');
   state1.ws.pushJson({ type: 'seg' });
   state1.ws.pushPcmSamples(3);
   const timerId = must(prefetchInactivityTimers.get(state1), 'future prefetch must own an inactivity timer');
